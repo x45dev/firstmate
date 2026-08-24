@@ -1,0 +1,78 @@
+=== Scenario 1: PR 2584 real shape (lone Greptile bot PASSED, no repository suite ran, no fork run reachable) ===
+Command: bin/fm-pr-ci-verify.sh https://github.com/example/repo/pull/2584
+https://github.com/example/repo/pull/2584
+  other SUCCESS	- / Greptile Review
+example/repo checks: no-repo-ci (0 repository-owned)
+error: refusing to call https://github.com/example/repo/pull/2584 green: no example/repo suite ran on this commit.
+A third-party check passing is not this repository's CI passing, and there is
+no separate head repository whose own run could have validated it.
+Exit code: 1
+
+=== Scenario 2: PR 2855 real shape (lone Greptile bot FAILED, no repository suite ran) ===
+Command: bin/fm-pr-ci-verify.sh https://github.com/example/repo/pull/2855
+https://github.com/example/repo/pull/2855
+  other FAILURE	- / Greptile Review
+example/repo checks: no-repo-ci (0 repository-owned)
+error: refusing to call https://github.com/example/repo/pull/2855 green: no example/repo suite ran on this commit.
+A third-party check passing is not this repository's CI passing, and there is
+no separate head repository whose own run could have validated it.
+Exit code: 1
+
+=== Scenario 3: workflow-runs false green (cli/cli 32701833535 shape) - fork run concluded 'success' with only Lint reporting, Repo invariants skipped ===
+Command: bin/fm-pr-ci-verify.sh https://github.com/example/repo/pull/3001
+https://github.com/example/repo/pull/3001
+example/repo checks: none (0 repository-owned)
+no example/repo suite ran on this commit; reading contributor/firstmate at deadbeef
+  run 42 success	CI (push)
+  job success	Lint
+  job skipped	Repo invariants
+contributor/firstmate runs: failing
+error: refusing to call https://github.com/example/repo/pull/3001 green: the contributor/firstmate runs are failing (see above).
+Exit code: 1
+
+=== Scenario 4: legitimate fork validation - fork run concluded success with the complete required-suite roster green ===
+Command: bin/fm-pr-ci-verify.sh https://github.com/example/repo/pull/3002
+https://github.com/example/repo/pull/3002
+example/repo checks: none (0 repository-owned)
+no example/repo suite ran on this commit; reading contributor/firstmate at deadbeef
+  run 42 success	CI (push)
+  job success	Lint
+  job success	Test coverage guard
+  job success	Behavior portable parallel 1
+  job success	Behavior portable parallel 2
+  job success	Behavior portable serial 1
+  job success	Behavior portable serial 2
+  job success	Behavior portable serial 3
+  job success	Behavior portable serial 4
+  job success	Behavior tests (Herdr)
+  job success	Behavior timing aggregate
+  job success	Stock macOS Bash snapshot compatibility
+  job success	Repo invariants
+contributor/firstmate runs: passing
+validated: contributor/firstmate suites passed on deadbeef in contributor/firstmate; example/repo has not run its own and does not need to for this to be validated
+Exit code: 0
+
+=== Scenario 5: workflow-runs false green, roster shape - fork run concluded 'success' and its only job is Lint (rest of roster never reported at all) ===
+Command: bin/fm-pr-ci-verify.sh https://github.com/example/repo/pull/3003
+https://github.com/example/repo/pull/3003
+example/repo checks: none (0 repository-owned)
+no example/repo suite ran on this commit; reading contributor/firstmate at deadbeef
+  run 42 success	CI (push)
+  job success	Lint
+contributor/firstmate runs: incomplete
+missing required suites:
+  Test coverage guard
+  Behavior portable parallel 1
+  Behavior portable parallel 2
+  Behavior portable serial 1
+  Behavior portable serial 2
+  Behavior portable serial 3
+  Behavior portable serial 4
+  Behavior tests (Herdr)
+  Behavior timing aggregate
+  Stock macOS Bash snapshot compatibility
+  Repo invariants
+error: refusing to call https://github.com/example/repo/pull/3003 green: the contributor/firstmate CI run does not cover the required suite roster (see above).
+A workflow run concludes success when no job failed, which a run whose jobs
+were skipped or never expanded also does, so that is not evidence the suites ran.
+Exit code: 1
