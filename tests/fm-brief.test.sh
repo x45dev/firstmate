@@ -354,6 +354,46 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# A generated ship brief must not let a worker report green checks on a verdict
+# it never corroborated. Three fork-raised PRs reached a "1 passed, 0 failed,
+# 1 total" summary whose only check was a review bot, and two of those workers
+# appended "done: PR <url> checks green" off it; a fourth had its pipeline's own
+# test step pass on code the repository's suite then failed. So every brief that
+# can report a PR names the corroboration command and makes the green claim
+# conditional on that command's own verdict.
+test_pr_reports_require_ci_corroboration() {
+  local home brief
+  home="$TMP_ROOT/corroborate-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-corr-c1 some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/brief-corr-c1/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  assert_grep "bin/fm-ci-corroborate.sh" "$brief" \
+    "no-mistakes DOD must name the command that corroborates the checks"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Only when it prints `ci-corroboration: green` may you append' "$brief" \
+    "no-mistakes DOD must make the green claim conditional on the corroborated verdict"
+  assert_grep "The pipeline's verdict and its internal test step are not that evidence" "$brief" \
+    "no-mistakes DOD must say the pipeline cannot corroborate its own verdict"
+  assert_grep "neither is a passing check from a third-party review bot" "$brief" \
+    "no-mistakes DOD must say a review bot cannot corroborate the checks"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'If it prints `ci-corroboration: not-green`, do NOT claim green checks' "$brief" \
+    "no-mistakes DOD must forbid a green claim the command refused"
+  assert_no_grep "until merge), append" "$brief" \
+    "no-mistakes DOD still appends the green done line straight off the pipeline verdict"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-corr-c2 some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/brief-corr-c2/brief.md"
+  assert_present "$brief" "direct-PR brief was not scaffolded"
+  assert_grep "Do not claim the checks are green in that line unless" "$brief" \
+    "direct-PR DOD must forbid an uncorroborated green claim"
+  assert_grep "bin/fm-ci-corroborate.sh" "$brief" \
+    "direct-PR DOD must name the command that corroborates the checks"
+  pass "fm-brief.sh: a green-checks report requires the forge-side corroboration first"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -756,6 +796,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_reports_require_ci_corroboration
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

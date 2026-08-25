@@ -43,6 +43,9 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
+# Every generated ship brief that can report a PR requires bin/fm-ci-corroborate.sh
+# before any done: line claiming green checks, because a pipeline's own verdict has
+# been observed reporting green over a check set holding no repository CI at all.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -384,6 +387,7 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Do not claim the checks are green in that line unless \`$FM_ROOT/bin/fm-ci-corroborate.sh {url}\` prints \`ci-corroboration: green\`; it is the only evidence that this repository's own CI ran and concluded at the pull request's exact head.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -422,7 +426,12 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), corroborate that verdict yourself before you report it.
+Run \`$FM_ROOT/bin/fm-ci-corroborate.sh {url}\`: it reads the forge and reports whether this repository's own CI actually ran and concluded successfully at the pull request's exact current head.
+The pipeline's verdict and its internal test step are not that evidence, and neither is a passing check from a third-party review bot.
+Only when it prints \`ci-corroboration: green\` may you append \`done: PR {url} checks green\`, and carry its \`corroborated:\` line in your summary.
+If it prints \`ci-corroboration: not-green\`, do NOT claim green checks however green the pipeline says they are: append \`blocked: {the first refusing line it printed}\` and stop.
+You are finished either way; firstmate decides what happens next.
 EOF
     ;;
 esac

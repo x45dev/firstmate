@@ -5,6 +5,10 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# On GitHub, arming also reports whether repository CI is corroborated at the
+# pull request's head through bin/fm-ci-corroborate.sh, which owns that verdict.
+# The report is advisory and never refuses: a repository with no PR CI is
+# supported, and the point is only that an uncorroborated verdict says so.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -137,3 +141,23 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Recording a PR-ready task is the exact point where a validation tool's own
+# "checks green" verdict enters firstmate's records, and where a merge that keys
+# off that verdict begins. The forge is the only authority on whether this
+# repository's CI actually ran, so read it here and say so out loud.
+# This never refuses. A repository with no PR CI at all is a supported
+# configuration and its merge poll must still be armed; the point is that
+# firstmate never mistakes an uncorroborated verdict for a corroborated one.
+if [ "$PROVIDER" = github ]; then
+  CI_REPORT=$("$SCRIPT_DIR/fm-ci-corroborate.sh" "$URL" 2>/dev/null) || true
+  case "$CI_REPORT" in
+    "ci-corroboration: green"*)
+      printf '%s\n' "$CI_REPORT" | sed -n 's/^corroborated: /notice: repository CI corroborated - /p' >&2
+      ;;
+    *)
+      printf 'warning: repository CI is NOT corroborated at this head; a "checks green" verdict from any other source is not evidence\n' >&2
+      printf 'warning: run bin/fm-ci-corroborate.sh %s for the per-check reasons\n' "$URL" >&2
+      ;;
+  esac
+fi
