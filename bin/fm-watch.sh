@@ -758,9 +758,17 @@ surface_nonterminal_stale() {  # <window> <hash>
 #
 # .allowance-<key> remembers the detail already surfaced, so a worker sitting at
 # its limit prompt cannot re-wake firstmate every poll. It is dropped the moment
-# the worker is no longer parked, so a later park surfaces again.
-allowance_park_check() {  # <window> <task> <key> <tail>
-  local win=$1 task=$2 key=$3 tail=$4 marker detail reason harness wt meta
+# the worker is no longer parked, so a later park surfaces again - but only on a
+# call that saw every signal available for this window this cycle. <final>=1
+# marks that call: either it carries the settled pane tail, or the caller knows
+# no pane check will follow this cycle (a secondmate not admitted to the
+# pane-stale path). A structural-only probe ahead of that (<final>=0, empty
+# tail, ordinary worker or an admitted mate) may still detect and wake on a
+# positive verdict, but a negative one there is inconclusive, not "not parked",
+# so it must not erase a marker a later, fuller check in the same cycle depends
+# on for de-duplication.
+allowance_park_check() {  # <window> <task> <key> <tail> <final>
+  local win=$1 task=$2 key=$3 tail=$4 final=$5 marker detail reason harness wt meta
   meta="$STATE/$task.meta"
   marker="$STATE/.allowance-$key"
   [ -n "$task" ] && [ -f "$meta" ] || return 0
@@ -770,7 +778,7 @@ allowance_park_check() {  # <window> <task> <key> <tail>
   harness=$(grep '^harness=' "$meta" | cut -d= -f2- || true)
   wt=$(grep '^worktree=' "$meta" | cut -d= -f2- || true)
   if ! detail=$(fm_allowance_park_detail "$harness" "$wt" "$tail"); then
-    rm -f "$marker"
+    [ "$final" = 1 ] && rm -f "$marker"
     return 0
   fi
   [ "$(cat "$marker" 2>/dev/null || true)" != "$detail" ] || return 0
@@ -1372,9 +1380,17 @@ EOF
     # Ahead of the secondmate skip and the capture below: a park is invisible to
     # both. A mate's idle endpoint is healthy, but a mate whose own transcript
     # records a refused turn is not, and the structural signal tells the two
-    # apart without reading a pane.
-    allowance_park_check "$w" "$task" "$key" ""
+    # apart without reading a pane. A mate that skips the pane check below gets
+    # no fuller look this cycle, so this structural-only probe IS the complete
+    # evidence for it and may clear its marker; an ordinary worker (or an
+    # admitted mate) still has the pane check ahead, so this probe is
+    # inconclusive for it and must not clear the marker on its own.
+    mate_skips_pane=0
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
+      mate_skips_pane=1
+    fi
+    allowance_park_check "$w" "$task" "$key" "" "$mate_skips_pane"
+    if [ "$mate_skips_pane" -eq 1 ]; then
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
@@ -1395,7 +1411,9 @@ EOF
     if [ "$h" = "$prev" ]; then
       # Two identical captures: the pane has settled, so the rendered arm may be
       # trusted now. Ahead of the busy gate below, which a park can survive.
-      allowance_park_check "$w" "$task" "$key" "$tail40"
+      # This call carries the pane, so it is always the complete evidence for
+      # the window this cycle and may clear a marker the probe above left be.
+      allowance_park_check "$w" "$task" "$key" "$tail40" 1
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then

@@ -349,6 +349,40 @@ test_watcher_surfaces_each_park_once() {
   pass "a park surfaces once per episode rather than on every poll"
 }
 
+# Pins the pane-only fallback (no locatable/trusted transcript for this
+# worktree) specifically, since that is the path where an ordinary worker's
+# structural-only probe - the one run ahead of the secondmate skip, with an
+# empty tail - used to clear the marker on its own inconclusive failure just
+# before the settled-pane call re-detected the same park and re-fired the wake.
+# A "parked" fixture never reaches this: its transcript resolves on the first,
+# empty-tail probe, so the marker is never at risk of that probe's failure path.
+test_watcher_surfaces_a_pane_only_park_once_across_relaunches() {
+  build_parked_case allowance-pane-only none "$PARKED_PANE_LINE"
+  launch_case_watcher "$CASE_DIR/watch.out"
+  wait_for_exit "$CASE_PID" 100 \
+    || { reap "$CASE_PID"; fail "the watcher never surfaced the pane-only park"; }
+  grep -Fq "parked on the account allowance" "$CASE_OUT" \
+    || fail "the pane-only park did not surface as an allowance wake: $(cat "$CASE_OUT")"
+  [ -s "$CASE_STATE/.allowance-$CASE_KEY" ] \
+    || fail "the surfaced pane-only park left no marker, so it would re-wake every poll"
+  # Firstmate handles the wake exactly as in the once-per-episode case above, so
+  # the next watcher does not immediately re-announce the prior run's own exit as
+  # downtime before ever reaching the stale scan this bug lives in.
+  FM_STATE_OVERRIDE="$CASE_STATE" "$DRAIN" > "$CASE_DIR/drain2.out" 2> "$CASE_DIR/drain2.err" || true
+  ack_drain_err "$CASE_STATE" "$CASE_DIR/drain2.err" \
+    || fail "could not acknowledge the first pane-only allowance wake"
+  # The worker is still sitting at its limit prompt with the same unreadable
+  # transcript, so relaunching must not wake firstmate again for the same park.
+  launch_case_watcher "$CASE_DIR/watch2.out"
+  wait_for_exit "$CASE_PID" 60 >/dev/null 2>&1 || true
+  reap "$CASE_PID"
+  ! grep -Fq "parked on the account allowance" "$CASE_OUT" \
+    || fail "the same pane-only park woke firstmate twice: $(cat "$CASE_OUT")"
+  ! grep -Fq "parked on the account allowance" "$CASE_STATE/.wake-queue" 2>/dev/null \
+    || fail "the same pane-only park was queued twice: $(cat "$CASE_STATE/.wake-queue")"
+  pass "a pane-only park surfaces once per episode instead of re-waking on every poll"
+}
+
 test_pane_signal_reads_the_rendered_notice
 test_pane_signal_is_bounded_to_the_prompt_region
 test_record_signal_is_current_state_not_history
@@ -361,3 +395,4 @@ test_watcher_surfaces_a_park_it_would_otherwise_call_healthy
 test_watcher_surfaces_a_park_from_the_transcript_alone
 test_watcher_leaves_an_ordinary_worker_alone
 test_watcher_surfaces_each_park_once
+test_watcher_surfaces_a_pane_only_park_once_across_relaunches
