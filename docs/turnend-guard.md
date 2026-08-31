@@ -124,7 +124,9 @@ Each pass forks through `fm_watcher_healthy` and `fm_pid_identity`, so a budget 
 
 The budget bounds the retrying and nothing else, and is not a promise about how long the Stop hook takes.
 The hook pays a fixed cost whatever the budget is - sourcing its libraries, the primary-scope checks, and on the blocking path the budget accounting and banner - and with the budget set to zero that fixed cost alone measured about 5 seconds on a loaded host.
-One complete evaluation is irreducible, because the guard cannot conclude a proof is absent without looking for all of them, so the deadline is checked after each evaluation rather than inside one; the loop's last act before breaking is therefore a full evaluation, and no re-evaluation follows it.
+One complete evaluation is irreducible, because the guard cannot conclude a proof is absent without looking for all of them, so the deadline is checked after each evaluation rather than inside one.
+Exactly one further evaluation follows the loop, on the path that was already about to block, to catch a claim published in the gap between the loop's last evaluation and the deadline break - the moment a loaded host's auto-arm is likeliest to land its claim.
+It costs nothing when recovery is confirmed early, because the loop exits before ever reaching it.
 
 The designed gap is separate and remains: a Claude home is unwatched for the duration of every turn, because the Stop hook is `asyncRewake` and the next turn's start ends the arm and its watcher together.
 A long turn therefore looks like a drop in the beacon record and is not one.
