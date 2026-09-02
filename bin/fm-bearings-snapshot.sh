@@ -250,15 +250,20 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      # Each repository is judged against its own required suite roster
-      # (bin/fm-ci-checks-lib.sh owns where that comes from), resolved once per
-      # repository here rather than once per row. A repository whose roster
-      # cannot be established is classified against an empty one, which the
-      # classifier refuses as incomplete: an unknown standard costs these rows
-      # their green, and can never hand one out.
-      if fm_ci_roster "$repo" 2>/dev/null; then repo_roster=$FM_CI_ROSTER; else repo_roster='[]'; fi
+      # Each repository is judged against its own gating workflows and required
+      # suite roster (bin/fm-ci-checks-lib.sh owns where both come from),
+      # resolved once per repository here rather than once per row. A repository
+      # whose standard cannot be established is classified against empty ones,
+      # which the classifier refuses as incomplete: an unknown standard costs
+      # these rows their green, and can never hand one out.
+      if fm_ci_roster "$repo" 2>/dev/null; then
+        repo_roster=$FM_CI_ROSTER; repo_workflows=$FM_CI_WORKFLOWS
+      else
+        repo_roster='[]'; repo_workflows='[]'
+      fi
       repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" \
-        --argjson fm_ci_roster "$repo_roster" "$FM_CI_CHECKS_JQ_DEFS"'
+        --argjson fm_ci_roster "$repo_roster" --argjson fm_ci_workflows "$repo_workflows" \
+        "$FM_CI_CHECKS_JQ_DEFS"'
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,

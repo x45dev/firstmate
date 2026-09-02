@@ -59,7 +59,8 @@ bin/fm-pr-ci-verify.sh <pr-url>   # did repository suites actually run and pass 
 
 It reports which suites ran and where, accepts a commit your fork validated while the upstream run is still held, and refuses every outcome that only looks green.
 [`bin/fm-ci-checks-lib.sh`](bin/fm-ci-checks-lib.sh) owns that rule, and everything in this repo that turns checks into a verdict classifies through it.
-The roster it requires is read from the repository the pull request targets, so a change that deliberately adds or removes a CI job is judged against a roster the target branch has not recorded yet; `FM_CI_REQUIRED_SUITES` in that script's header is the override for exactly that case.
+Both halves of the standard it holds a commit to - which workflows gate the repository, and which suites those workflows must report - are read from the repository the pull request targets, from its own successful push runs on the target branch, so a repository whose gate is not a workflow named `CI` is answered rather than refused.
+The two overrides in that script's header cover what observation cannot: `FM_CI_REQUIRED_SUITES` for a change that deliberately adds or removes a CI job, whose branch is judged against a roster the target branch has not recorded yet, and `FM_CI_GATING_WORKFLOWS` for a repository whose gate the push-run rule gets wrong.
 
 ## Repo conventions
 

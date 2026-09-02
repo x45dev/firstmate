@@ -25,15 +25,22 @@
 # repository and run, so a green verdict always says where its evidence came
 # from and is never confused with the upstream pull request having been checked.
 #
-# The roster of suites a green verdict requires belongs to the repository the
-# pull request targets, and is resolved from it for every run of this script -
-# see fm_ci_roster in bin/fm-ci-checks-lib.sh, which owns where it comes from
-# and why. This script is asked about any repository the fleet works in, so it
-# holds no roster of its own; a repository whose roster cannot be established is
-# refused rather than judged against somebody else's.
+# The standard a green verdict is held to - which workflows gate the repository
+# and which suites they must report - belongs to the repository the pull request
+# targets, and is resolved from it for every run of this script. See
+# fm_ci_roster in bin/fm-ci-checks-lib.sh, which owns where both halves come
+# from and why. This script is asked about any repository the fleet works in, so
+# it names neither half itself: a repository whose gate or roster cannot be
+# established is refused rather than judged against another repository's, and a
+# repository whose gating workflow is not called "CI" is answered rather than
+# discarded.
 #
 # Usage: fm-pr-ci-verify.sh <pr-url>
-# Env:   FM_CI_REQUIRED_SUITES  JSON array of job names to require instead of
+# Env:   FM_CI_GATING_WORKFLOWS  JSON array of workflow names to treat as the
+#          repository's gate instead of the ones read from its own successful
+#          push runs on the target branch. The escape hatch for a repository
+#          that rule gets wrong.
+#        FM_CI_REQUIRED_SUITES  JSON array of job names to require instead of
 #          the roster read from the target repository. The escape hatch for a
 #          change that deliberately adds or removes a CI job, whose branch is
 #          therefore judged against a roster the target branch has not
@@ -89,28 +96,34 @@ head_repo=$(printf '%s' "$pr" | jq -r '
   | ((.headRepository.name // "") | tostring) as $n
   | if $o == "" or $n == "" then "" else $o + "/" + $n end' 2>/dev/null) || head_repo=''
 
-# The standard is settled before any verdict is read against it. A roster that
-# cannot be established is a refusal in its own right, because without it no
-# rollup can be told apart from a rollup missing half of itself.
+# The standard is settled before any verdict is read against it. A gate or a
+# roster that cannot be established is a refusal in its own right: without the
+# gate no check can be told apart from another repository's, and without the
+# roster no rollup can be told apart from a rollup missing half of itself.
 if ! fm_ci_roster "$BASE_REPO" "$base_ref"; then
   {
     printf 'error: refusing to call %s green: could not establish what %s requires of a commit.\n' \
       "$URL" "$BASE_REPO"
-    echo "See the reason above. Set FM_CI_REQUIRED_SUITES to the JSON array of job names"
+    echo "See the reason above. Set FM_CI_GATING_WORKFLOWS to the JSON array of workflow names"
+    echo "that gate this repository, or FM_CI_REQUIRED_SUITES to the JSON array of job names"
     echo "this change expects if the roster is one the target branch has not recorded yet."
   } >&2
   exit 1
 fi
 ROSTER=$FM_CI_ROSTER
+WORKFLOWS=$FM_CI_WORKFLOWS
 
-state=$(fm_ci_checks_state "$rollup" "$ROSTER") || unreadable "the checks on $URL"
+state=$(fm_ci_checks_state "$rollup" "$ROSTER" "$WORKFLOWS") || unreadable "the checks on $URL"
 
 # The roster is printed for every outcome, including the passing one, so the
 # evidence behind a green verdict is on the record rather than only its verdict.
 printf '%s\n' "$URL"
+printf 'gating workflows: %s, from %s\n' \
+  "$(printf '%s' "$WORKFLOWS" | jq -r 'join(", ")')" "$FM_CI_WORKFLOWS_SOURCE"
 printf 'required suites: %s, from %s\n' \
   "$(printf '%s' "$ROSTER" | jq -r 'length')" "$FM_CI_ROSTER_SOURCE"
-roster=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" "$FM_CI_CHECKS_JQ_DEFS"'
+roster=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" \
+  --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
   def row: "  " + (if fm_ci_repo_owned then "suite " else "other " end)
     + ((.conclusion // .state // "pending") | tostring)
     + "\t" + (((.workflowName // "") | tostring) as $w | if $w == "" then "-" else $w end)
@@ -119,7 +132,8 @@ roster=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" "$FM_CI_
   | .[]' 2>/dev/null) || roster=''
 [ -z "$roster" ] || printf '%s\n' "$roster"
 
-own=$(printf '%s' "$rollup" | jq --argjson fm_ci_roster "$ROSTER" "$FM_CI_CHECKS_JQ_DEFS"'
+own=$(printf '%s' "$rollup" | jq --argjson fm_ci_roster "$ROSTER" \
+  --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
   [.[] | select(fm_ci_repo_owned)] | length' 2>/dev/null) || own='?'
 printf '%s checks: %s (%s repository-owned)\n' "$BASE_REPO" "$state" "$own"
 
@@ -128,6 +142,7 @@ printf '%s checks: %s (%s repository-owned)\n' "$BASE_REPO" "$state" "$own"
 # passing" with no way to tell what would make it so.
 if [ "$state" = incomplete ]; then
   missing=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" \
+    --argjson fm_ci_workflows "$WORKFLOWS" \
     "$FM_CI_CHECKS_JQ_DEFS"'fm_ci_missing_suites | .[]' 2>/dev/null) || missing=''
   [ -z "$missing" ] || printf 'missing required suites:\n%s\n' "$(printf '%s\n' "$missing" | sed 's/^/  /')"
 fi
@@ -177,7 +192,8 @@ runs=$(gh api "repos/$head_repo/actions/runs?head_sha=$head_sha&per_page=100" \
 # the jobs of every CI run at this commit are read and judged against the same
 # roster the rollup shape uses. bin/fm-ci-checks-lib.sh owns why a successful
 # run is not that evidence.
-ci_run_ids=$(printf '%s' "$runs" | jq -r --argjson fm_ci_roster "$ROSTER" "$FM_CI_CHECKS_JQ_DEFS"'
+ci_run_ids=$(printf '%s' "$runs" | jq -r --argjson fm_ci_roster "$ROSTER" \
+  --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
   .[] | select(fm_ci_run_from_ci_workflow) | (.id // empty) | tostring' 2>/dev/null) \
   || unreadable "the workflow runs in $head_repo"
 
@@ -193,7 +209,7 @@ for run_id in $ci_run_ids; do
     || unreadable "the jobs of run $run_id in $head_repo"
 done
 
-fork_state=$(fm_ci_run_jobs_state "$runs" "$ci_jobs" "$ROSTER") \
+fork_state=$(fm_ci_run_jobs_state "$runs" "$ci_jobs" "$ROSTER" "$WORKFLOWS") \
   || unreadable "the workflow runs in $head_repo"
 fork_roster=$(printf '%s' "$runs" | jq -r '
   .[] | "  run " + ((.id // "-") | tostring) + " " + ((.conclusion // .status) | tostring)
@@ -209,7 +225,8 @@ job_roster=$(printf '%s' "$ci_jobs" | jq -r '
 printf '%s runs: %s\n' "$head_repo" "$fork_state"
 
 if [ "$fork_state" = incomplete ]; then
-  fork_missing=$(printf '%s' "$ci_jobs" | jq -r --argjson fm_ci_roster "$ROSTER" "$FM_CI_CHECKS_JQ_DEFS"'
+  fork_missing=$(printf '%s' "$ci_jobs" | jq -r --argjson fm_ci_roster "$ROSTER" \
+    --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
     fm_ci_jobs_missing_suites | .[]' 2>/dev/null) || fork_missing=''
   if [ -n "$fork_missing" ]; then
     printf 'missing required suites:\n%s\n' "$(printf '%s\n' "$fork_missing" | sed 's/^/  /')"

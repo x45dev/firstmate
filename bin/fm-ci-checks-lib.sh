@@ -34,8 +34,8 @@
 # and so needs the workflowName discriminator above, and whose entries are the
 # individual job check runs the roster is read from directly. A commit in a
 # given repository carries workflow runs, which are that repository's own by
-# construction, but still mix every workflow the repository owns together - the
-# CI workflow alongside a PR-body policy check or a manually dispatched spike -
+# construction, but still mix every workflow the repository owns together - a
+# gating workflow alongside a PR-body policy check or a manually dispatched spike -
 # so this file applies the same by-name filter to that shape too, rather than
 # accepting any repository-owned run as a stand-in for the one that actually
 # ran the suites. The second shape is what answers "did MY fork validate this
@@ -57,14 +57,15 @@
 #
 # States, in the order the classifier decides them. Both shapes use the same
 # set, except no-repo-ci, which only the rollup shape can observe:
-#   none        the commit carries no checks at all, or no CI workflow run
-#   no-repo-ci  checks exist, but the CI workflow itself never produced one
+#   none        the commit carries no checks at all, or no gating workflow run
+#   no-repo-ci  checks exist, but no gating workflow ever produced one
 #   failing     at least one check reached a red conclusion
 #   pending     at least one check has not finished
-#   incomplete  the CI workflow reported, and everything it reported succeeded,
-#               but fewer than its full required roster of suites is in there,
-#               or that roster could not be established at all
-#   passing     the CI workflow ran and every required suite succeeded
+#   incomplete  the gating workflows reported, and everything they reported
+#               succeeded, but fewer than the full required roster of suites is
+#               in there, or the gate or that roster could not be established
+#               at all
+#   passing     the gating workflows ran and every required suite succeeded
 #
 # Only passing is evidence. Read against the three outcomes a caller has to
 # tell apart - the required suites ran and passed, the required suites ran and
@@ -85,8 +86,8 @@
 # the workflow's jobs never started or never reported - and read exactly like
 # "1 passed, 0 failed" to anything that only tallies conclusions, the same
 # false-green shape the no-repo-ci and other-workflow cases above already
-# guard against. fm_ci_required_suites is the fix: the full job roster the CI
-# workflow is expected to report, by the display name GitHub renders for each
+# guard against. fm_ci_required_suites is the fix: the full job roster the
+# gating workflows are expected to report, by the display name GitHub renders for each
 # job (matrix jobs expanded, one name per shard). A rollup missing any of them
 # is incomplete rather than passing, even when every check it does carry is
 # green. incomplete is deliberately its own state rather than folded into
@@ -105,8 +106,9 @@
 # repositories in one session before it was removed.
 #
 # fm_ci_roster derives the roster by OBSERVATION rather than by parsing
-# .github/workflows/ci.yml: it reads the job names of the newest successful CI
-# run on the branch the change is aimed at. The workflow file is the
+# .github/workflows/: it reads the job names of the newest successful run of
+# each gating workflow on the branch the change is aimed at. The workflow file
+# is the
 # definition, but it is not a roster - a job name is a template evaluated by
 # GitHub ("Behavior portable serial ${{ matrix.shard }}", or a matrix.include
 # leg's "${{ matrix.name }}"), so turning that file into names means
@@ -115,48 +117,85 @@
 # done that evaluation in every run it has recorded, exactly and for free.
 # Reading the run on the TARGET branch rather than on the branch under test is
 # deliberate for the same reason the roster exists at all: a branch that thins
-# its own ci.yml would otherwise certify itself.
+# its own workflow file would otherwise certify itself.
 #
 # "Repository-owned" alone is not enough evidence: a commit can carry a
 # passing check from some OTHER workflow that repository owns (a PR-body
-# policy check, a manually dispatched spike) while the CI workflow - the one
-# whose jobs are the actual suites - never ran on it at all, because it did
+# policy check, a manually dispatched spike) while the gating workflow - the
+# one whose jobs are the actual suites - never ran on it at all, because it did
 # not trigger or its job graph failed to expand. That reads as "1 passed, 0
 # failed" to anything that only checks "is some repository check green", which is
 # same false-green shape as a third-party bot, just from inside the
-# repository instead of outside it. fm_ci_workflow_name names the one
-# workflow whose run is the actual evidence, and both classifiers require it
-# by name rather than accepting any repository-owned check as a stand-in.
+# repository instead of outside it. fm_ci_workflow_names holds the workflows
+# whose runs are that evidence, and both classifiers require them by name
+# rather than accepting any repository-owned check as a stand-in.
+#
+# WHICH workflows those are belongs to the repository under test and to no
+# other, for exactly the reason the roster does, so fm_ci_roster resolves them
+# per repository too rather than this file naming one. The constant this file
+# used to carry - the literal name "CI" - was the roster constant's mistake one
+# layer up, one repository's answer written down as every repository's. A
+# repository whose gate is named anything else had every conclusion it produced
+# discarded before the roster was ever consulted, and this command refused four
+# separately hand-verified pull requests over two days on a repository whose
+# whole pull request gate is a workflow named "lint". The roster could not
+# rescue that and no roster override can: the roster is bound separately as
+# $fm_ci_roster and is read one layer BELOW the workflow-name filter, so a
+# rollup emptied by that filter never reaches it.
+#
+# The resolution is observation, from the same query the roster is read from:
+# the workflows this repository has actually run to validate the TARGET branch,
+# taken from the successful PUSH runs on that branch. Reading the target branch
+# rather than the branch under test is deliberate for the same reason it is
+# there: a branch that deleted the gating workflow would otherwise certify
+# itself. Restricting to push runs is what separates a gate from the rest of a
+# repository's workflows, and it is a real discriminator rather than a
+# convenience - x45dev/agent-standards owns exactly two workflows, and the one
+# that gates its pull requests is the one that also runs on a push to main,
+# while its release workflow is workflow_dispatch only and would otherwise drag
+# its release jobs into the roster of every pull request.
+#
+# Two boundaries come with that, and both cost a verdict rather than granting
+# one. A workflow that runs ONLY on pull_request is not in the gate, because a
+# fork validating a commit on its own branch push can never produce such a run
+# and requiring one would refuse the head-repository evidence this file exists
+# to accept. And a workflow that runs on a push to the target branch but not on
+# pull requests - a deploy, a release-notes job - IS in the gate, so a pull
+# request carrying no run of it reads incomplete. FM_CI_GATING_WORKFLOWS is the
+# override for a repository either boundary gets wrong, the same escape hatch
+# FM_CI_REQUIRED_SUITES is for the roster.
+#
+# The window is the newest 100 successful push runs on that branch. A workflow
+# that has not validated the branch inside it is not in the gate, which is the
+# bound this resolution accepts in exchange for answering in one API call.
 #
 # A check or run that finished as SKIPPED, NEUTRAL, or STALE is also refused
 # rather than treated as passing: those conclusions mean the job never
 # actually validated anything, so a CI run that completed with one of its
 # jobs in that state is a partially-skipped workflow, not a clean pass.
 
-# The one workflow whose jobs are the suites, by the name it declares. Shared
-# by the jq classifiers below and by the roster lookup, so both narrow to the
-# same workflow rather than each carrying its own idea of which one counts.
-FM_CI_WORKFLOW_NAME='CI'
-
 # jq function definitions. Prepend to a jq program; the program then calls
 # fm_ci_state on an array of statusCheckRollup entries.
 #
-# Every program built on these defs must bind $fm_ci_roster, the required suite
-# roster fm_ci_roster resolved for the repository under test, with
-# --argjson fm_ci_roster. jq refuses to compile a program whose variables are
-# not bound, so a caller that forgets one cannot silently classify against an
-# absent roster - it gets no verdict at all. The shell wrappers at the bottom of
-# this file take the roster as an argument and do that binding for you.
-# $all, $own and $fm_ci_roster are jq variables, deliberately not shell
-# expansions.
+# Every program built on these defs must bind BOTH halves of the standard
+# fm_ci_roster resolves for the repository under test, with --argjson:
+# $fm_ci_workflows, the names of the workflows whose runs are that repository's
+# gate, and $fm_ci_roster, the required suite roster inside them. jq refuses to
+# compile a program whose variables are not bound, so a caller that forgets one
+# cannot silently classify against an absent standard - it gets no verdict at
+# all. The shell wrappers at the bottom of this file take both as arguments and
+# do that binding for you.
+# $all, $own, $fm_ci_workflows and $fm_ci_roster are jq variables, deliberately
+# not shell expansions.
 # shellcheck disable=SC2016
 FM_CI_CHECKS_JQ_DEFS='
-def fm_ci_workflow_name: "'"$FM_CI_WORKFLOW_NAME"'";
+def fm_ci_workflow_names: $fm_ci_workflows;
 def fm_ci_required_suites: $fm_ci_roster;
 def fm_ci_repo_owned:
   ((.__typename // "") == "CheckRun") and (((.workflowName // "") | tostring) != "");
 def fm_ci_from_ci_workflow:
-  fm_ci_repo_owned and (((.workflowName // "") | tostring) == fm_ci_workflow_name);
+  ((.workflowName // "") | tostring) as $w
+  | fm_ci_repo_owned and ((fm_ci_workflow_names | index($w)) != null);
 def fm_ci_check_red:
   (((.conclusion // .state // "") | tostring | ascii_upcase)) as $s
   | $s == "FAILURE" or $s == "ERROR" or $s == "TIMED_OUT" or $s == "CANCELLED"
@@ -175,10 +214,18 @@ def fm_ci_missing_suites:
 # it as incomplete instead, so a roster lookup that failed can only ever cost a
 # verdict, never grant one.
 def fm_ci_no_roster: (fm_ci_required_suites | length) == 0;
+# An empty gate is "the gating workflows could not be established", never
+# "nothing gates this repository". With no names to match, every check reads as
+# belonging to somebody else and the rollup would report no-repo-ci - a finding
+# about the pull request, when what is missing is the standard. Both classifiers
+# report incomplete instead, which is where every other unestablished standard
+# already lands, and which no caller may read as evidence.
+def fm_ci_no_gate: (fm_ci_workflow_names | length) == 0;
 def fm_ci_state:
   (. // []) as $all
   | [$all[] | select(fm_ci_from_ci_workflow)] as $ci
   | if ($all | length) == 0 then "none"
+    elif fm_ci_no_gate then "incomplete"
     elif ($ci | length) == 0 then "no-repo-ci"
     elif any($all[]; fm_ci_check_red) then "failing"
     elif any($all[]; fm_ci_check_unfinished) then "pending"
@@ -189,7 +236,8 @@ def fm_ci_state:
 # and conclusion fields in the same lower case, unlike the upper-case GraphQL
 # spelling of the rollup shape, so one pair of predicates classifies both.
 def fm_ci_run_from_ci_workflow:
-  ((.name // "") | tostring) == fm_ci_workflow_name;
+  ((.name // "") | tostring) as $w
+  | (fm_ci_workflow_names | index($w)) != null;
 def fm_ci_rest_red:
   (((.conclusion // "") | tostring | ascii_downcase)) as $c
   | $c == "failure" or $c == "cancelled" or $c == "timed_out"
@@ -223,7 +271,8 @@ def fm_ci_run_jobs_state:
   (.runs // []) as $all
   | (.jobs // []) as $jobs
   | [$all[] | select(fm_ci_run_from_ci_workflow)] as $runs
-  | if ($runs | length) == 0 then "none"
+  | if fm_ci_no_gate then "incomplete"
+    elif ($runs | length) == 0 then "none"
     elif any($runs[]; fm_ci_rest_red) then "failing"
     elif any($runs[]; fm_ci_rest_unfinished) then "pending"
     elif ($jobs | length) == 0 then "incomplete"
@@ -241,51 +290,81 @@ fm_ci_gh() {
   gh "$@"
 }
 
-# Set by fm_ci_roster: the roster itself as a JSON array, and a human-readable
-# phrase naming where it came from, so a verdict can print the provenance of the
-# standard it was judged against rather than only the standard. Returned through
-# variables rather than on stdout, the same way fm_pr_url_parse returns FM_PR_*,
-# because a caller reading them out of a command substitution would lose the
-# provenance to the subshell.
+# Set by fm_ci_roster: the two halves of the standard a commit is judged
+# against - the gating workflow names and the required suite roster inside them
+# - each as a JSON array, and for each a human-readable phrase naming where it
+# came from, so a verdict can print the provenance of the standard it was judged
+# against rather than only the standard. Returned through variables rather than
+# on stdout, the same way fm_pr_url_parse returns FM_PR_*, because a caller
+# reading them out of a command substitution would lose the provenance to the
+# subshell.
+FM_CI_WORKFLOWS=''
+FM_CI_WORKFLOWS_SOURCE=''
 FM_CI_ROSTER=''
 FM_CI_ROSTER_SOURCE=''
 
-# fm_ci_roster <repo> [<branch>]: resolve the required suite roster for <repo>
-# into FM_CI_ROSTER, a JSON array of job display names, and set
-# FM_CI_ROSTER_SOURCE to where it came from. <branch> is the branch the change
-# is aimed at, defaulting to the repository's own default branch.
+# fm_ci_roster <repo> [<branch>]: resolve what <repo> requires of a commit into
+# FM_CI_WORKFLOWS, a JSON array of gating workflow names, and FM_CI_ROSTER, a
+# JSON array of the job display names those workflows are expected to report,
+# and set the two SOURCE variables to where each came from. <branch> is the
+# branch the change is aimed at, defaulting to the repository's own default
+# branch.
 #
-# The roster is the job names of the newest SUCCESSFUL CI run on that branch:
-# the names GitHub itself rendered the last time the workflow reported in full,
-# with every matrix leg already expanded. A successful run is required rather
-# than merely a completed one because a run cancelled before its jobs were
-# created carries no names at all, and an empty roster is the one answer that
-# could turn every green rollup into a pass.
+# Both halves are read by OBSERVATION from one query: the repository's
+# successful PUSH runs on that branch. The workflows among them are the gate,
+# and the job names of the newest such run of each are the roster - the names
+# GitHub itself rendered the last time each workflow reported in full, with
+# every matrix leg already expanded. A successful run is required rather than
+# merely a completed one because a run cancelled before its jobs were created
+# carries no names at all, and an empty roster is the one answer that could turn
+# every green rollup into a pass. The file header owns why the gate is push runs
+# on the target branch and what that choice costs.
 #
-# FM_CI_REQUIRED_SUITES overrides the lookup with an explicit JSON array. It is
-# the escape hatch for the one case observation cannot serve: a change that
-# deliberately adds or removes a CI job, whose branch is therefore judged
+# Two overrides name a standard outright instead, for the cases observation
+# cannot serve. FM_CI_REQUIRED_SUITES is a JSON array of job names, for a change
+# that deliberately adds or removes a CI job, whose branch is therefore judged
 # against a roster the target branch has not recorded yet.
+# FM_CI_GATING_WORKFLOWS is a JSON array of workflow names, for a repository
+# whose gate the push-run rule gets wrong. Set on its own it still takes the
+# roster from those workflows' observed runs, so a named workflow the branch has
+# never validated is refused rather than quietly contributing no suites at all.
 #
-# Leaves FM_CI_ROSTER empty and returns 1 when no roster can be established,
-# naming the reason on stderr. Every caller must treat that as a refusal: this
-# function never returns an empty roster, because a caller cannot tell one apart
-# from a repository that requires nothing.
+# Leaves every output variable empty and returns 1 when either half cannot be
+# established, naming the reason on stderr. Every caller must treat that as a
+# refusal: this function never returns an empty array, because a caller cannot
+# tell one apart from a repository that requires nothing.
 fm_ci_roster() {
-  local repo=$1 branch=${2:-} workflows wf_id runs run_id jobs total roster
+  local repo=$1 branch=${2:-}
+  local gate_override='' roster_override='' runs gate observed missing
+  local names names_source roster roster_source
+  local name run_id run_jobs total jobs
+  FM_CI_WORKFLOWS=''
+  FM_CI_WORKFLOWS_SOURCE=''
   FM_CI_ROSTER=''
   FM_CI_ROSTER_SOURCE=''
 
+  if [ -n "${FM_CI_GATING_WORKFLOWS:-}" ]; then
+    gate_override=$(printf '%s' "$FM_CI_GATING_WORKFLOWS" | jq -c '
+      if type == "array" and length > 0 and all(.[]; type == "string" and . != "")
+      then unique else error("not a non-empty array of workflow names") end' 2>/dev/null) || {
+      echo "error: FM_CI_GATING_WORKFLOWS is set but is not a non-empty JSON array of workflow names" >&2
+      return 1
+    }
+  fi
   if [ -n "${FM_CI_REQUIRED_SUITES:-}" ]; then
-    roster=$(printf '%s' "$FM_CI_REQUIRED_SUITES" | jq -c '
+    roster_override=$(printf '%s' "$FM_CI_REQUIRED_SUITES" | jq -c '
       if type == "array" and length > 0 and all(.[]; type == "string" and . != "")
       then unique else error("not a non-empty array of job names") end' 2>/dev/null) || {
       echo "error: FM_CI_REQUIRED_SUITES is set but is not a non-empty JSON array of job names" >&2
       return 1
     }
-    # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
-    FM_CI_ROSTER=$roster
-    # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  fi
+
+  # Both halves named outright: the repository is never reached at all.
+  if [ -n "$gate_override" ] && [ -n "$roster_override" ]; then
+    FM_CI_WORKFLOWS=$gate_override
+    FM_CI_WORKFLOWS_SOURCE="the FM_CI_GATING_WORKFLOWS override"
+    FM_CI_ROSTER=$roster_override
     FM_CI_ROSTER_SOURCE="the FM_CI_REQUIRED_SUITES override"
     return 0
   fi
@@ -299,92 +378,152 @@ fm_ci_roster() {
     }
   fi
 
-  # Resolved by name against the repository's own workflow list rather than by
-  # guessing a file path, so a repository that keeps its CI workflow somewhere
-  # other than .github/workflows/ci.yml is found and one that has no such
-  # workflow is refused by name instead of silently producing no roster.
-  workflows=$(fm_ci_gh api "repos/$repo/actions/workflows?per_page=100" 2>/dev/null) || workflows=''
-  wf_id=$(printf '%s' "$workflows" | jq -r --arg n "$FM_CI_WORKFLOW_NAME" '
-    [.workflows[]? | select((.name // "") == $n)] | .[0].id // empty' 2>/dev/null) || wf_id=''
-  [ -n "$wf_id" ] || {
-    printf 'error: %s has no workflow named %s to take a required suite roster from\n' \
-      "$repo" "$FM_CI_WORKFLOW_NAME" >&2
-    return 1
-  }
-
+  # One query answers both halves. Run ids increase over time, so the largest id
+  # carrying a given workflow name is that workflow's newest successful run on
+  # the branch, without depending on the order the reply happens to arrive in.
   runs=$(fm_ci_gh api \
-    "repos/$repo/actions/workflows/$wf_id/runs?branch=$branch&status=success&per_page=1" 2>/dev/null) \
-    || runs=''
-  run_id=$(printf '%s' "$runs" | jq -r '.workflow_runs[0].id // empty' 2>/dev/null) || run_id=''
-  [ -n "$run_id" ] || {
-    printf 'error: %s has no successful %s run on %s to take a required suite roster from\n' \
-      "$repo" "$FM_CI_WORKFLOW_NAME" "$branch" >&2
-    return 1
-  }
+    "repos/$repo/actions/runs?branch=$branch&status=success&event=push&per_page=100" \
+    2>/dev/null) || runs=''
+  observed=$(printf '%s' "$runs" | jq -c '
+    [.workflow_runs[]? | {name: ((.name // "") | tostring), id: .id}
+     | select(.name != "" and (.id | type) == "number")]
+    | group_by(.name) | map({name: .[0].name, run: (map(.id) | max)})
+    | sort_by(.name)' 2>/dev/null) || observed=''
+  [ -n "$observed" ] || observed='[]'
 
-  jobs=$(fm_ci_gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) || jobs=''
-  # A second page of jobs would arrive as a roster with names missing from it,
-  # which can only ever understate what is required and so can only ever grant
-  # a pass that was not earned. Refused rather than truncated.
-  total=$(printf '%s' "$jobs" | jq -r '.total_count // empty' 2>/dev/null) || total=''
-  case "$total" in
-    ''|*[!0-9]*)
-      printf 'error: could not read the jobs of %s run %s in %s\n' \
-        "$FM_CI_WORKFLOW_NAME" "$run_id" "$repo" >&2
+  if [ -n "$gate_override" ]; then
+    names=$gate_override
+    names_source="the FM_CI_GATING_WORKFLOWS override"
+    gate=$(jq -cn --argjson observed "$observed" --argjson want "$gate_override" '
+      [$want[] | . as $n | {name: $n, run: ([$observed[] | select(.name == $n) | .run] | max)}]' \
+      2>/dev/null) || gate='[]'
+  else
+    if [ "$observed" = '[]' ]; then
+      printf 'error: %s has run no workflow on a push to %s, so its gating workflows cannot be established\n' \
+        "$repo" "$branch" >&2
       return 1
-      ;;
-  esac
-  [ "$total" -le 100 ] || {
-    printf 'error: %s run %s in %s reports %s jobs, more than one page can name\n' \
-      "$FM_CI_WORKFLOW_NAME" "$run_id" "$repo" "$total" >&2
-    return 1
-  }
-  roster=$(printf '%s' "$jobs" | jq -c '
-    [.jobs[]? | (.name // "") | select(type == "string" and . != "")] | unique' 2>/dev/null) || roster=''
-  [ -n "$roster" ] && [ "$roster" != '[]' ] || {
-    printf 'error: %s run %s in %s named no jobs to require\n' \
-      "$FM_CI_WORKFLOW_NAME" "$run_id" "$repo" >&2
+    fi
+    names=$(printf '%s' "$observed" | jq -c '[.[].name] | unique' 2>/dev/null) || names=''
+    [ -n "$names" ] || {
+      printf 'error: could not read the workflows %s runs on a push to %s\n' "$repo" "$branch" >&2
+      return 1
+    }
+    names_source="$repo successful push runs on $branch"
+    gate=$observed
+  fi
+
+  if [ -n "$roster_override" ]; then
+    FM_CI_WORKFLOWS=$names
+    FM_CI_WORKFLOWS_SOURCE=$names_source
+    FM_CI_ROSTER=$roster_override
+    FM_CI_ROSTER_SOURCE="the FM_CI_REQUIRED_SUITES override"
+    return 0
+  fi
+
+  # A gate the branch has never validated has no roster to offer, and an
+  # overridden gate is the only way to reach that state.
+  missing=$(printf '%s' "$gate" | jq -r '.[] | select(.run == null) | .name' 2>/dev/null \
+    | tr '\n' ' ') || missing=''
+  missing=${missing% }
+  [ -z "$missing" ] || {
+    printf 'error: %s has no successful push run of %s on %s to take a required suite roster from\n' \
+      "$repo" "$missing" "$branch" >&2
     return 1
   }
 
+  roster='[]'
+  roster_source=''
+  while IFS='	' read -r name run_id; do
+    [ -n "$run_id" ] || continue
+    run_jobs=$(fm_ci_gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) \
+      || run_jobs=''
+    # A second page of jobs would arrive as a roster with names missing from it,
+    # which can only ever understate what is required and so can only ever grant
+    # a pass that was not earned. Refused rather than truncated.
+    total=$(printf '%s' "$run_jobs" | jq -r '.total_count // empty' 2>/dev/null) || total=''
+    case "$total" in
+      ''|*[!0-9]*)
+        printf 'error: could not read the jobs of %s run %s in %s\n' "$name" "$run_id" "$repo" >&2
+        return 1
+        ;;
+    esac
+    [ "$total" -le 100 ] || {
+      printf 'error: %s run %s in %s reports %s jobs, more than one page can name\n' \
+        "$name" "$run_id" "$repo" "$total" >&2
+      return 1
+    }
+    jobs=$(printf '%s' "$run_jobs" | jq -c '
+      [.jobs[]? | (.name // "") | select(type == "string" and . != "")] | unique' 2>/dev/null) \
+      || jobs=''
+    [ -n "$jobs" ] && [ "$jobs" != '[]' ] || {
+      printf 'error: %s run %s in %s named no jobs to require\n' "$name" "$run_id" "$repo" >&2
+      return 1
+    }
+    roster=$(jq -cn --argjson a "$roster" --argjson b "$jobs" '($a + $b) | unique' 2>/dev/null) \
+      || roster=''
+    [ -n "$roster" ] || {
+      printf 'error: could not assemble the required suite roster of %s on %s\n' "$repo" "$branch" >&2
+      return 1
+    }
+    roster_source="${roster_source:+$roster_source, }$name run $run_id"
+  done <<EOF
+$(printf '%s' "$gate" | jq -r '.[] | select(.run != null) | "\(.name)\t\(.run)"' 2>/dev/null)
+EOF
+
+  [ "$roster" != '[]' ] && [ -n "$roster_source" ] || {
+    printf 'error: %s named no jobs to require on %s\n' "$repo" "$branch" >&2
+    return 1
+  }
+
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_CI_WORKFLOWS=$names
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_CI_WORKFLOWS_SOURCE=$names_source
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_CI_ROSTER=$roster
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
-  FM_CI_ROSTER_SOURCE="$repo $FM_CI_WORKFLOW_NAME run $run_id on $branch"
+  FM_CI_ROSTER_SOURCE="$repo $roster_source on $branch"
 }
 
-# fm_ci_checks_state <rollup-json> <roster-json>: print the state of one
-# statusCheckRollup array against the required suite roster. Unreadable input -
-# either payload - is refused rather than classified, so a malformed or
-# truncated payload can never be reported as passing.
+
+# fm_ci_checks_state <rollup-json> <roster-json> <workflows-json>: print the
+# state of one statusCheckRollup array against the standard fm_ci_roster
+# resolved - the gating workflow names and the required suite roster inside
+# them. Unreadable input - any payload - is refused rather than classified, so a
+# malformed or truncated payload can never be reported as passing.
 fm_ci_checks_state() {
-  fm_ci_classify "$1" fm_ci_state "$2"
+  fm_ci_classify "$1" fm_ci_state "$2" "$3"
 }
 
-# fm_ci_runs_state <workflow-runs-json>: print the run-level state of one
+# fm_ci_runs_state <workflow-runs-json> <workflows-json>: print the run-level state of one
 # repository's own workflow runs at a commit, refusing unreadable input the
 # same way. Every run in that array came from the repository it was read from,
 # but a repository can own more than one workflow, so this still narrows to the
 # CI workflow's own runs before judging red, pending, or passing. Its passing
 # means "no CI run here is red or unfinished", NOT "the required suites ran":
 # a caller deciding whether to call a commit green wants fm_ci_run_jobs_state.
-# It takes no roster because it consults none.
+# It takes no roster because it consults none, and reports none rather than a
+# state of its own when the gating workflows could not be established, which is
+# a refusal like every other answer of its that is not passing.
 fm_ci_runs_state() {
-  fm_ci_classify "$1" fm_ci_runs_state '[]'
+  fm_ci_classify "$1" fm_ci_runs_state '[]' "$2"
 }
 
-# fm_ci_run_jobs_state <workflow-runs-json> <ci-jobs-json> <roster-json>: print
-# the state of a repository's own CI runs at a commit judged against the
-# required suite roster, where the second argument is the jobs of those CI runs.
+# fm_ci_run_jobs_state <workflow-runs-json> <ci-jobs-json> <roster-json>
+# <workflows-json>: print the state of a repository's own gating-workflow runs
+# at a commit judged against the required suite roster, where the second
+# argument is the jobs of those runs.
 # This is the workflow-runs answer to the same question the rollup shape
 # answers, and the only one of the two that can return a passing verdict a
 # caller may act on. Any payload being unreadable is refused rather than
 # classified, so a truncated reply can never arrive at passing.
 fm_ci_run_jobs_state() {
-  local runs=$1 jobs=$2 roster=$3 state
+  local runs=$1 jobs=$2 roster=$3 workflows=$4 state
   state=$(jq -rn --argjson runs "$runs" --argjson jobs "$jobs" --argjson fm_ci_roster "$roster" \
+    --argjson fm_ci_workflows "$workflows" \
     "$FM_CI_CHECKS_JQ_DEFS"'
-    if ($runs | type) == "array" and ($jobs | type) == "array" and ($fm_ci_roster | type) == "array"
+    if ($runs | type) == "array" and ($jobs | type) == "array"
+      and ($fm_ci_roster | type) == "array" and ($fm_ci_workflows | type) == "array"
     then {runs: $runs, jobs: $jobs} | fm_ci_run_jobs_state
     else error("payload is not an array") end' 2>/dev/null) || return 1
   [ -n "$state" ] || return 1
@@ -392,9 +531,11 @@ fm_ci_run_jobs_state() {
 }
 
 fm_ci_classify() {
-  local payload=$1 fn=$2 roster=$3 state
-  state=$(printf '%s' "$payload" | jq -r --argjson fm_ci_roster "$roster" "$FM_CI_CHECKS_JQ_DEFS"'
-    if type == "array" and ($fm_ci_roster | type) == "array" then '"$fn"' else error("payload is not an array") end' 2>/dev/null) || return 1
+  local payload=$1 fn=$2 roster=$3 workflows=$4 state
+  state=$(printf '%s' "$payload" | jq -r --argjson fm_ci_roster "$roster" \
+    --argjson fm_ci_workflows "$workflows" "$FM_CI_CHECKS_JQ_DEFS"'
+    if type == "array" and ($fm_ci_roster | type) == "array" and ($fm_ci_workflows | type) == "array"
+    then '"$fn"' else error("payload is not an array") end' 2>/dev/null) || return 1
   [ -n "$state" ] || return 1
   printf '%s\n' "$state"
 }
