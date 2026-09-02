@@ -310,11 +310,11 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
-  assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
+  assert_no_grep "make \`--intent\` carry every requirement" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
-  assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
+  assert_no_grep "make \`--intent\` carry every requirement" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
@@ -337,7 +337,7 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_grep "make \`--intent\` preserve all relevant content from this brief" "$brief" \
+  assert_grep "make \`--intent\` carry every requirement, constraint, exclusion, rejected alternative, and accepted decision in this brief" "$brief" \
     "no-mistakes DOD must require --intent to retain the accepted task contract"
   assert_grep "carrying only each requirement's current accepted form" "$brief" \
     "no-mistakes DOD must replace superseded requirements with their current accepted form"
@@ -345,6 +345,22 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  # no-mistakes prepends --intent into the published PR body verbatim, so the
+  # instruction must say where the text lands and who reads it. Without this the
+  # brief's only sentence about carrying its own text is a carriage order, and
+  # fleet framing rides it into the project's repository.
+  assert_grep "publishes it verbatim as the pull request's \`## Intent\` section in the project's own repository" "$brief" \
+    "no-mistakes DOD must tell the worker the intent is published verbatim in the project's repository"
+  assert_grep "so write it for a reader there" "$brief" \
+    "no-mistakes DOD must aim the intent at a reader of the project's own repository"
+  assert_grep "carrying no path outside the project, no fleet role or process noun, and no internal decision history that means nothing in that repository" "$brief" \
+    "no-mistakes DOD must name what the published intent may not carry"
+  assert_grep "give it without naming who made it" "$brief" \
+    "no-mistakes DOD must keep decision provenance available in depersonalised form"
+  # The reviewer reads --intent as authoritative acceptance criteria, so the
+  # publication constraint must never read as licence to shorten it.
+  assert_grep "It never means carrying less" "$brief" \
+    "no-mistakes DOD must forbid reading the publication constraint as licence to thin the intent"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
@@ -352,6 +368,41 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# Brief text reaches a worker carrying no marker separating it from project truth
+# or from publishable text, which is how dispatch prose has been quoted into
+# published PR bodies and cited as a project's own instruction. Every task brief
+# must therefore open by marking itself private, not only the no-mistakes variant:
+# a direct-PR worker writes its PR body freely from the same context.
+test_privacy_marking_opens_every_task_brief() {
+  local home id brief kind
+  home="$TMP_ROOT/privacy-marking-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r kind args; do
+    [ -n "$kind" ] || continue
+    id="brief-privacy-${kind}"
+    # shellcheck disable=SC2086 # args is a deliberate argument list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $args >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "This brief is private fleet material" "$brief" \
+      "$kind brief did not mark itself private fleet material"
+    assert_grep "never quote it into a project artifact, never cite it as project truth" "$brief" \
+      "$kind brief did not forbid quoting brief text into a project artifact or citing it as project truth"
+    assert_grep "reproduce it publicly only where this brief explicitly says to" "$brief" \
+      "$kind brief did not bound public reproduction to an explicit named exception"
+    # The marking is worthless below the task text a worker acts on first.
+    [ "$(grep -n 'This brief is private fleet material' "$brief" | cut -d: -f1)" -lt \
+      "$(grep -n '^# Task$' "$brief" | cut -d: -f1)" ] \
+      || fail "$kind brief carries the privacy marking below its # Task section"
+  done <<'ROWS'
+no-mistakes|--mode no-mistakes
+direct-PR|--mode direct-PR
+local-only|--mode local-only
+scout|--scout
+ROWS
+  pass "fm-brief.sh: every task brief opens by marking itself private fleet material"
 }
 
 test_ship_project_memory_wording() {
@@ -756,6 +807,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_privacy_marking_opens_every_task_brief
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
