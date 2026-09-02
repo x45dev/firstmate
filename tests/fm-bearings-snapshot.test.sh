@@ -49,17 +49,17 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
-# The per-repository required suite roster (bin/fm-ci-checks-lib.sh): the
-# snapshot asks each repository what its own CI workflow reports before it can
-# call any of that repository's rows green. The fixture answers with the roster
-# the PR fixtures below carry, so a row that is genuinely complete reads as
-# passing rather than as a roster it could not establish.
+# The per-repository standard (bin/fm-ci-checks-lib.sh): the snapshot asks each
+# repository which workflows gate it and what those workflows report before it
+# can call any of that repository's rows green. The fixture answers with the
+# successful push runs on the branch and the roster the PR fixtures below carry,
+# so a row that is genuinely complete reads as passing rather than as a standard
+# it could not establish.
 if [ "${1:-}" = api ]; then
   case "${2:-}" in
-    */actions/workflows/*/runs*) printf '{"workflow_runs":[{"id":5150,"name":"CI"}]}\n' ;;
-    */actions/workflows*)        printf '{"total_count":1,"workflows":[{"id":77,"name":"CI"}]}\n' ;;
     */jobs*)
       printf '%s\n' '{"total_count":12,"jobs":[{"name":"Lint"},{"name":"Test coverage guard"},{"name":"Behavior portable parallel 1"},{"name":"Behavior portable parallel 2"},{"name":"Behavior portable serial 1"},{"name":"Behavior portable serial 2"},{"name":"Behavior portable serial 3"},{"name":"Behavior portable serial 4"},{"name":"Behavior tests (Herdr)"},{"name":"Behavior timing aggregate"},{"name":"Stock macOS Bash snapshot compatibility"},{"name":"Repo invariants"}]}' ;;
+    */actions/runs*)             printf '{"workflow_runs":[{"id":5150,"name":"CI"}]}\n' ;;
     *)                           printf '{"default_branch":"main"}\n' ;;
   esac
   exit 0

@@ -39,6 +39,12 @@ bot() {
 # a roster of one repository's job names refuses every other repository by
 # construction, however green that repository genuinely is.
 ROSTER='["Lint","Test coverage guard","Repo invariants"]'
+# The gating workflows those suites belong to, the other half of the standard
+# every classifier call below is judged against and a fixture for the same
+# reason. It is named "CI" here only because the fixture rollups say so; the
+# classifier has no idea what a repository calls its gate and must be told,
+# which is what the constant this file used to bind got wrong.
+WORKFLOWS='["CI"]'
 
 # Every suite the roster requires, all green - the only rollup shape that a
 # real, fully-reported CI run produces.
@@ -49,13 +55,13 @@ complete_suite() {
 
 # --- the classifier ---------------------------------------------------------
 
-[ "$(fm_ci_checks_state "[]" "$ROSTER")" = none ] \
+[ "$(fm_ci_checks_state "[]" "$ROSTER" "$WORKFLOWS")" = none ] \
   || fail "an empty rollup must be none"
 pass "a commit with no checks at all classifies as none"
 
 # The regression this file exists for.
 ONLY_BOT="[$(bot 'Greptile Review' SUCCESS)]"
-GOT=$(fm_ci_checks_state "$ONLY_BOT" "$ROSTER")
+GOT=$(fm_ci_checks_state "$ONLY_BOT" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" = no-repo-ci ] || fail "a lone passing third-party check must be no-repo-ci, got: $GOT"
 [ "$GOT" != passing ] || fail "a lone passing third-party check must never be passing"
 pass "a rollup of nothing but a passing third-party bot classifies as no-repo-ci, not passing"
@@ -63,7 +69,7 @@ pass "a rollup of nothing but a passing third-party bot classifies as no-repo-ci
 # Several passing third-party checks are still no evidence: the state must come
 # from where the checks came from, never from how many of them passed.
 MANY_BOTS="[$(bot 'Greptile Review' SUCCESS),$(bot 'Coverage' SUCCESS),$(bot 'Sizebot' SUCCESS)]"
-[ "$(fm_ci_checks_state "$MANY_BOTS" "$ROSTER")" = no-repo-ci ] \
+[ "$(fm_ci_checks_state "$MANY_BOTS" "$ROSTER" "$WORKFLOWS")" = no-repo-ci ] \
   || fail "many passing third-party checks must still be no-repo-ci"
 pass "no number of passing third-party checks adds up to repository CI"
 
@@ -77,19 +83,19 @@ pass "no number of passing third-party checks adds up to repository CI"
 PR_2584_ROLLUP='[{"__typename":"CheckRun","completedAt":"2026-08-22T23:25:48Z","conclusion":"SUCCESS","detailsUrl":"https://greptile.com/","name":"Greptile Review","startedAt":"2026-08-22T23:18:08Z","status":"COMPLETED","workflowName":""}]'
 PR_2855_ROLLUP='[{"__typename":"CheckRun","completedAt":"2026-08-23T10:58:04Z","conclusion":"FAILURE","detailsUrl":"https://greptile.com/","name":"Greptile Review","startedAt":"2026-08-23T10:56:06Z","status":"COMPLETED","workflowName":""}]'
 
-GOT=$(fm_ci_checks_state "$PR_2584_ROLLUP" "$ROSTER")
+GOT=$(fm_ci_checks_state "$PR_2584_ROLLUP" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" != passing ] || fail "the recorded PR 2584 rollup must never be passing"
 [ "$GOT" = no-repo-ci ] || fail "the recorded PR 2584 rollup must be no-repo-ci, got: $GOT"
 pass "the passing-bot rollup recorded on PR 2584 classifies as no-repo-ci, not passing"
 
-GOT=$(fm_ci_checks_state "$PR_2855_ROLLUP" "$ROSTER")
+GOT=$(fm_ci_checks_state "$PR_2855_ROLLUP" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" != passing ] || fail "the recorded PR 2855 rollup must never be passing"
 [ "$GOT" = no-repo-ci ] || fail "the recorded PR 2855 rollup must be no-repo-ci, got: $GOT"
 pass "the failing-bot rollup recorded on PR 2855 classifies as no-repo-ci, not passing"
 
 # A legacy commit status is not a check run and cannot stand in for a suite.
 LEGACY='[{"__typename":"StatusContext","context":"ci/external","state":"SUCCESS"}]'
-[ "$(fm_ci_checks_state "$LEGACY" "$ROSTER")" = no-repo-ci ] \
+[ "$(fm_ci_checks_state "$LEGACY" "$ROSTER" "$WORKFLOWS")" = no-repo-ci ] \
   || fail "a passing legacy commit status must be no-repo-ci"
 pass "a legacy commit status does not count as a repository-owned suite"
 
@@ -97,7 +103,7 @@ pass "a legacy commit status does not count as a repository-owned suite"
 # whole roster: it stays incomplete, never passing, until every required
 # suite has reported. The bot may still ride along either way.
 WITH_SUITE="[$(suite Lint SUCCESS),$(bot 'Greptile Review' SUCCESS)]"
-GOT=$(fm_ci_checks_state "$WITH_SUITE" "$ROSTER")
+GOT=$(fm_ci_checks_state "$WITH_SUITE" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" = incomplete ] \
   || fail "a passing repository suite short of the full roster must be incomplete, got: $GOT"
 pass "a repository-owned suite short of the full roster classifies as incomplete, not passing"
@@ -108,7 +114,7 @@ pass "a repository-owned suite short of the full roster classifies as incomplete
 # roster never reported at all.
 COMPLETE_SUITE=$(complete_suite)
 WITH_COMPLETE_SUITE=$(printf '%s' "$COMPLETE_SUITE" | jq -c ". + [$(bot 'Greptile Review' SUCCESS)]")
-[ "$(fm_ci_checks_state "$WITH_COMPLETE_SUITE" "$ROSTER")" = passing ] \
+[ "$(fm_ci_checks_state "$WITH_COMPLETE_SUITE" "$ROSTER" "$WORKFLOWS")" = passing ] \
   || fail "every required suite passing alongside a passing bot must be passing"
 pass "the complete required-suite roster is what makes an all-green rollup passing"
 
@@ -116,7 +122,7 @@ pass "the complete required-suite roster is what makes an all-green rollup passi
 # still incomplete, not passing - conclusion-tallying alone cannot tell the
 # two apart, which is exactly why fm_ci_missing_suites exists.
 ALMOST_COMPLETE=$(printf '%s' "$COMPLETE_SUITE" | jq -c '.[1:]')
-GOT=$(fm_ci_checks_state "$ALMOST_COMPLETE" "$ROSTER")
+GOT=$(fm_ci_checks_state "$ALMOST_COMPLETE" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" = incomplete ] \
   || fail "a roster missing one required suite must be incomplete, got: $GOT"
 pass "a rollup missing part of the required suite roster is incomplete even when everything present is green"
@@ -128,7 +134,7 @@ other_workflow() {
   printf '{"__typename":"CheckRun","workflowName":"%s","name":"%s","status":"COMPLETED","conclusion":"%s"}' "$1" "$2" "$3"
 }
 ONLY_OTHER_WORKFLOW="[$(other_workflow 'Require no-mistakes' 'PR must be raised via no-mistakes' SUCCESS)]"
-GOT=$(fm_ci_checks_state "$ONLY_OTHER_WORKFLOW" "$ROSTER")
+GOT=$(fm_ci_checks_state "$ONLY_OTHER_WORKFLOW" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" = no-repo-ci ] \
   || fail "a passing check from a repository workflow other than CI must be no-repo-ci, got: $GOT"
 pass "a passing check from an unrelated repository-owned workflow is not CI having run"
@@ -136,39 +142,39 @@ pass "a passing check from an unrelated repository-owned workflow is not CI havi
 # A job that finished SKIPPED, NEUTRAL, or STALE never validated anything, so a
 # workflow that completed with one of those among otherwise-green jobs is a
 # partially-skipped run, not a clean pass.
-[ "$(fm_ci_checks_state "[$(suite Lint SUCCESS),$(suite 'Test coverage guard' SKIPPED)]" "$ROSTER")" = failing ] \
+[ "$(fm_ci_checks_state "[$(suite Lint SUCCESS),$(suite 'Test coverage guard' SKIPPED)]" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a skipped CI job among passing ones must refuse a passing verdict"
-[ "$(fm_ci_checks_state "[$(suite Lint NEUTRAL)]" "$ROSTER")" = failing ] \
+[ "$(fm_ci_checks_state "[$(suite Lint NEUTRAL)]" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a neutral CI job must refuse a passing verdict"
-[ "$(fm_ci_checks_state "[$(suite Lint STALE)]" "$ROSTER")" = failing ] \
+[ "$(fm_ci_checks_state "[$(suite Lint STALE)]" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a stale CI job must refuse a passing verdict"
 pass "a partially-skipped CI workflow is refused rather than read as passing"
 
 # The missing-suites diagnosis is decided before red and before waiting, so it
 # is never reported as one of those different problems.
-[ "$(fm_ci_checks_state "[$(bot 'Greptile Review' FAILURE)]" "$ROSTER")" = no-repo-ci ] \
+[ "$(fm_ci_checks_state "[$(bot 'Greptile Review' FAILURE)]" "$ROSTER" "$WORKFLOWS")" = no-repo-ci ] \
   || fail "a red third-party check with no suites must still be no-repo-ci"
-[ "$(fm_ci_checks_state "[$(bot 'Greptile Review' null)]" "$ROSTER")" = no-repo-ci ] \
+[ "$(fm_ci_checks_state "[$(bot 'Greptile Review' null)]" "$ROSTER" "$WORKFLOWS")" = no-repo-ci ] \
   || fail "an unfinished third-party check with no suites must still be no-repo-ci"
 pass "no-repo-ci is decided ahead of failing and pending, so missing suites are never mistaken for either"
 
-[ "$(fm_ci_checks_state "[$(suite Lint FAILURE),$(bot 'Greptile Review' SUCCESS)]" "$ROSTER")" = failing ] \
+[ "$(fm_ci_checks_state "[$(suite Lint FAILURE),$(bot 'Greptile Review' SUCCESS)]" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a red repository suite must be failing"
-[ "$(fm_ci_checks_state "[$(suite Lint SUCCESS),$(bot 'Greptile Review' FAILURE)]" "$ROSTER")" = failing ] \
+[ "$(fm_ci_checks_state "[$(suite Lint SUCCESS),$(bot 'Greptile Review' FAILURE)]" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a red third-party check alongside passing suites must be failing, not passing"
 pass "any red check refuses a passing verdict, whoever produced it"
 
 UNFINISHED='[{"__typename":"CheckRun","workflowName":"CI","name":"Lint","status":"IN_PROGRESS","conclusion":null}]'
-[ "$(fm_ci_checks_state "$UNFINISHED" "$ROSTER")" = pending ] \
+[ "$(fm_ci_checks_state "$UNFINISHED" "$ROSTER" "$WORKFLOWS")" = pending ] \
   || fail "an unfinished repository suite must be pending"
 pass "a suite still running classifies as pending"
 
 # Unreadable input is refused rather than classified, so a truncated or
 # malformed payload can never arrive at a passing verdict.
-if fm_ci_checks_state '{"not":"an array"}' "$ROSTER" >/dev/null 2>&1; then
+if fm_ci_checks_state '{"not":"an array"}' "$ROSTER" "$WORKFLOWS" >/dev/null 2>&1; then
   fail "a non-array payload must be refused, not classified"
 fi
-if fm_ci_checks_state 'not json at all' "$ROSTER" >/dev/null 2>&1; then
+if fm_ci_checks_state 'not json at all' "$ROSTER" "$WORKFLOWS" >/dev/null 2>&1; then
   fail "unparseable input must be refused, not classified"
 fi
 pass "an unreadable rollup is refused instead of being classified"
@@ -180,37 +186,37 @@ pass "an unreadable rollup is refused instead of being classified"
 run() { printf '{"id":%s,"name":"CI","status":"%s","conclusion":%s,"event":"push"}' "$1" "$2" "$3"; }
 named_run() { printf '{"id":%s,"name":"%s","status":"%s","conclusion":%s,"event":"push"}' "$1" "$2" "$3" "$4"; }
 
-[ "$(fm_ci_runs_state '[]')" = none ] || fail "no workflow runs must be none"
-[ "$(fm_ci_runs_state "[$(run 1 completed '"success"')]")" = passing ] \
+[ "$(fm_ci_runs_state '[]' "$WORKFLOWS")" = none ] || fail "no workflow runs must be none"
+[ "$(fm_ci_runs_state "[$(run 1 completed '"success"')]" "$WORKFLOWS")" = passing ] \
   || fail "a successful workflow run must be passing"
-[ "$(fm_ci_runs_state "[$(run 1 completed '"failure"')]")" = failing ] \
+[ "$(fm_ci_runs_state "[$(run 1 completed '"failure"')]" "$WORKFLOWS")" = failing ] \
   || fail "a failed workflow run must be failing"
-[ "$(fm_ci_runs_state "[$(run 1 completed '"cancelled"')]")" = failing ] \
+[ "$(fm_ci_runs_state "[$(run 1 completed '"cancelled"')]" "$WORKFLOWS")" = failing ] \
   || fail "a cancelled workflow run must be failing"
-[ "$(fm_ci_runs_state "[$(run 1 in_progress null)]")" = pending \
+[ "$(fm_ci_runs_state "[$(run 1 in_progress null)]" "$WORKFLOWS")" = pending \
   ] || fail "an unfinished workflow run must be pending"
-[ "$(fm_ci_runs_state "[$(run 1 completed '"success"'),$(run 2 completed '"failure"')]")" = failing ] \
+[ "$(fm_ci_runs_state "[$(run 1 completed '"success"'),$(run 2 completed '"failure"')]" "$WORKFLOWS")" = failing ] \
   || fail "one failed run among successes must be failing"
 pass "fm_ci_runs_state classifies a repository own workflow runs at a commit"
 
 # A successful run of some OTHER repository workflow is not evidence the CI
 # workflow ran - the same false-green shape as the rollup's unrelated check.
 ONLY_OTHER_RUN="[$(named_run 1 'Require no-mistakes' completed '"success"')]"
-[ "$(fm_ci_runs_state "$ONLY_OTHER_RUN")" = none ] \
+[ "$(fm_ci_runs_state "$ONLY_OTHER_RUN" "$WORKFLOWS")" = none ] \
   || fail "a passing run of a workflow other than CI must not count as CI having run"
-[ "$(fm_ci_runs_state "[$(named_run 1 'Require no-mistakes' completed '"success"'),$(run 2 completed '"success"')]")" = passing ] \
+[ "$(fm_ci_runs_state "[$(named_run 1 'Require no-mistakes' completed '"success"'),$(run 2 completed '"success"')]" "$WORKFLOWS")" = passing ] \
   || fail "a passing CI run must still be passing alongside an unrelated workflow's run"
 pass "fm_ci_runs_state ignores runs from workflows other than CI"
 
 # A run that completed with a skipped or neutral conclusion never validated
 # anything and must not be read as a clean pass.
-[ "$(fm_ci_runs_state "[$(run 1 completed '"skipped"')]")" = failing ] \
+[ "$(fm_ci_runs_state "[$(run 1 completed '"skipped"')]" "$WORKFLOWS")" = failing ] \
   || fail "a skipped CI run must refuse a passing verdict"
-[ "$(fm_ci_runs_state "[$(run 1 completed '"neutral"')]")" = failing ] \
+[ "$(fm_ci_runs_state "[$(run 1 completed '"neutral"')]" "$WORKFLOWS")" = failing ] \
   || fail "a neutral CI run must refuse a passing verdict"
 pass "fm_ci_runs_state refuses a skipped or neutral CI run"
 
-if fm_ci_runs_state '{"workflow_runs":[]}' >/dev/null 2>&1; then
+if fm_ci_runs_state '{"workflow_runs":[]}' "$WORKFLOWS" >/dev/null 2>&1; then
   fail "a non-array runs payload must be refused, not classified"
 fi
 pass "an unreadable workflow-runs payload is refused instead of being classified"
@@ -237,10 +243,10 @@ COMPLETE_JOBS=$(complete_jobs)
 # The demonstration that the run-level answer alone is the defect: the exact
 # same successful run is passing to fm_ci_runs_state and refused once its jobs
 # are read. Without this change the guard acts on the first answer.
-[ "$(fm_ci_runs_state "$GOOD_RUN")" = passing ] \
+[ "$(fm_ci_runs_state "$GOOD_RUN" "$WORKFLOWS")" = passing ] \
   || fail "the run-level classifier must still call a successful CI run passing"
 ONLY_LINT_JOB="[$(job Lint completed '"success"')]"
-GOT=$(fm_ci_run_jobs_state "$GOOD_RUN" "$ONLY_LINT_JOB" "$ROSTER")
+GOT=$(fm_ci_run_jobs_state "$GOOD_RUN" "$ONLY_LINT_JOB" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" != passing ] || fail "a successful CI run carrying only one job must never be passing"
 [ "$GOT" = incomplete ] \
   || fail "a successful CI run short of the required roster must be incomplete, got: $GOT"
@@ -249,53 +255,53 @@ pass "a successful head-repository CI run whose jobs are short of the roster is 
 # The recorded cli/cli 32701833535 shape: the run succeeded, and it succeeded
 # because skipped jobs do not fail a run.
 SKIPPED_JOBS="[$(job Lint completed '"success"'),$(job 'Repo invariants' completed '"skipped"')]"
-GOT=$(fm_ci_run_jobs_state "$GOOD_RUN" "$SKIPPED_JOBS" "$ROSTER")
+GOT=$(fm_ci_run_jobs_state "$GOOD_RUN" "$SKIPPED_JOBS" "$ROSTER" "$WORKFLOWS")
 [ "$GOT" != passing ] || fail "a successful CI run with a skipped job must never be passing"
 pass "a successful CI run whose jobs were skipped is refused rather than read as a clean pass"
 
 # The roster read from the jobs is what a passing verdict now rests on.
-[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$COMPLETE_JOBS" "$ROSTER")" = passing ] \
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$COMPLETE_JOBS" "$ROSTER" "$WORKFLOWS")" = passing ] \
   || fail "a successful CI run carrying the complete green roster must be passing"
 pass "the complete required-suite roster among the run jobs is what makes a head-repository run passing"
 
 ALMOST_JOBS=$(printf '%s' "$COMPLETE_JOBS" | jq -c '.[1:]')
-[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$ALMOST_JOBS" "$ROSTER")" = incomplete ] \
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$ALMOST_JOBS" "$ROSTER" "$WORKFLOWS")" = incomplete ] \
   || fail "a run roster missing one required suite must be incomplete"
 pass "a head-repository run missing one required suite is incomplete even when every job present is green"
 
 # Jobs that could not be read at all are not inherited from the run conclusion.
-[ "$(fm_ci_run_jobs_state "$GOOD_RUN" '[]' "$ROSTER")" = incomplete ] \
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" '[]' "$ROSTER" "$WORKFLOWS")" = incomplete ] \
   || fail "a successful run whose jobs could not be read must be incomplete"
 pass "a run whose jobs are unreadable is incomplete rather than inheriting the verdict of the run itself"
 
 # A red or unfinished job refuses the verdict the same way the rollup does.
 RED_JOBS=$(printf '%s' "$COMPLETE_JOBS" | jq -c '.[0].conclusion = "failure"')
-[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$RED_JOBS" "$ROSTER")" = failing ] \
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$RED_JOBS" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a red job in an otherwise complete roster must be failing"
 PENDING_JOBS=$(printf '%s' "$COMPLETE_JOBS" | jq -c '.[0] = {name: "Lint", status: "in_progress", conclusion: null}')
-[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$PENDING_JOBS" "$ROSTER")" = pending ] \
+[ "$(fm_ci_run_jobs_state "$GOOD_RUN" "$PENDING_JOBS" "$ROSTER" "$WORKFLOWS")" = pending ] \
   || fail "an unfinished job in an otherwise complete roster must be pending"
 pass "a red or unfinished job refuses a passing head-repository verdict"
 
 # The run-level states still decide first, so a red or unfinished run is never
 # reported as a roster problem, and no CI run at all is still none.
-[ "$(fm_ci_run_jobs_state "[$(run 42 completed '"failure"')]" "$COMPLETE_JOBS" "$ROSTER")" = failing ] \
+[ "$(fm_ci_run_jobs_state "[$(run 42 completed '"failure"')]" "$COMPLETE_JOBS" "$ROSTER" "$WORKFLOWS")" = failing ] \
   || fail "a red CI run must be failing whatever its jobs say"
-[ "$(fm_ci_run_jobs_state "[$(run 42 in_progress null)]" "$COMPLETE_JOBS" "$ROSTER")" = pending ] \
+[ "$(fm_ci_run_jobs_state "[$(run 42 in_progress null)]" "$COMPLETE_JOBS" "$ROSTER" "$WORKFLOWS")" = pending ] \
   || fail "an unfinished CI run must be pending whatever its jobs say"
-[ "$(fm_ci_run_jobs_state '[]' "$COMPLETE_JOBS" "$ROSTER")" = none ] \
+[ "$(fm_ci_run_jobs_state '[]' "$COMPLETE_JOBS" "$ROSTER" "$WORKFLOWS")" = none ] \
   || fail "no CI run at all must be none"
-[ "$(fm_ci_run_jobs_state "$ONLY_OTHER_RUN" "$COMPLETE_JOBS" "$ROSTER")" = none ] \
+[ "$(fm_ci_run_jobs_state "$ONLY_OTHER_RUN" "$COMPLETE_JOBS" "$ROSTER" "$WORKFLOWS")" = none ] \
   || fail "a run of a workflow other than CI must not count as CI having run"
 pass "the run-level states are decided before the roster, so each refusal names its own cause"
 
-if fm_ci_run_jobs_state "$GOOD_RUN" 'not json' "$ROSTER" >/dev/null 2>&1; then
+if fm_ci_run_jobs_state "$GOOD_RUN" 'not json' "$ROSTER" "$WORKFLOWS" >/dev/null 2>&1; then
   fail "an unreadable jobs payload must be refused, not classified"
 fi
-if fm_ci_run_jobs_state 'not json' "$COMPLETE_JOBS" "$ROSTER" >/dev/null 2>&1; then
+if fm_ci_run_jobs_state 'not json' "$COMPLETE_JOBS" "$ROSTER" "$WORKFLOWS" >/dev/null 2>&1; then
   fail "an unreadable runs payload must be refused, not classified"
 fi
-if fm_ci_run_jobs_state "$GOOD_RUN" '{"jobs":[]}' "$ROSTER" >/dev/null 2>&1; then
+if fm_ci_run_jobs_state "$GOOD_RUN" '{"jobs":[]}' "$ROSTER" "$WORKFLOWS" >/dev/null 2>&1; then
   fail "a non-array jobs payload must be refused, not classified"
 fi
 pass "an unreadable runs or jobs payload is refused instead of being classified"
@@ -303,23 +309,24 @@ pass "an unreadable runs or jobs payload is refused instead of being classified"
 # --- the guard ---------------------------------------------------------------
 
 # gh is stubbed for every read on the path - the pull request itself, the
-# roster lookup in the base repository, and the head repository workflow runs -
-# so the whole path runs without a network call. An empty FM_TEST_HEAD_REPO
+# standard lookup in the base repository, and the head repository workflow runs
+# - so the whole path runs without a network call. An empty FM_TEST_HEAD_REPO
 # means the pull request has no separate head repository, which is the
-# same-repository case. The base repository is example/repo, so the roster
+# same-repository case. The base repository is example/repo, so the standard
 # reads are the ones addressed to it and the evidence reads are the rest.
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = api ]; then
   case "${2:-}" in
-    repos/example/repo/actions/workflows/*/runs*) printf '%s\n' "${FM_TEST_CI_RUNS:-}" ;;
-    repos/example/repo/actions/workflows*)        printf '%s\n' "${FM_TEST_WORKFLOWS:-}" ;;
-    repos/example/repo/actions/runs/*/jobs*)      printf '%s\n' "${FM_TEST_ROSTER_JOBS:-}" ;;
-    repos/example/repo)                           printf '%s\n' "${FM_TEST_REPO_META:-}" ;;
+    repos/example/repo/actions/runs/*/jobs*) printf '%s\n' "${FM_TEST_ROSTER_JOBS:-}" ;;
+    # The one query both halves of the standard are read from: the base
+    # repository's successful push runs on the target branch.
+    repos/example/repo/actions/runs*)        printf '%s\n' "${FM_TEST_BRANCH_RUNS:-}" ;;
+    repos/example/repo)                      printf '%s\n' "${FM_TEST_REPO_META:-}" ;;
     # The evidence reads: the workflow runs at the commit in the head
-    # repository, and then the jobs of each CI run among them.
-    */jobs*)                                      printf '%s\n' "${FM_TEST_JOBS:-[]}" ;;
-    *)                                            printf '%s\n' "${FM_TEST_RUNS:-[]}" ;;
+    # repository, and then the jobs of each gating run among them.
+    */jobs*)                                 printf '%s\n' "${FM_TEST_JOBS:-[]}" ;;
+    *)                                       printf '%s\n' "${FM_TEST_RUNS:-[]}" ;;
   esac
   exit 0
 fi
@@ -344,12 +351,11 @@ FM_TEST_JOBS=$COMPLETE_JOBS
 FM_TEST_SHA=deadbeef
 FM_TEST_HEAD_REPO=
 FM_TEST_BASE_REF=main
-# What the base repository's own CI workflow last reported on main: one
-# workflow named CI, one successful run of it, and the roster of jobs that run
-# carried. This is what the guard now asks the repository under test for
-# instead of carrying a roster of its own.
-export FM_TEST_WORKFLOWS='{"total_count":2,"workflows":[{"id":9,"name":"Require no-mistakes"},{"id":77,"name":"CI"}]}'
-export FM_TEST_CI_RUNS='{"workflow_runs":[{"id":5150,"name":"CI"}]}'
+# What the base repository has successfully run on a push to main: one workflow
+# named CI, one run of it, and the roster of jobs that run carried. Both halves
+# of the standard are read from here, which is what the guard now asks the
+# repository under test for instead of naming either half itself.
+export FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":5150,"name":"CI"}]}'
 export FM_TEST_ROSTER_JOBS
 FM_TEST_ROSTER_JOBS=$(printf '%s' "$ROSTER" | jq -c '{total_count: length, jobs: [.[] | {name: .}]}')
 export FM_TEST_REPO_META='{"default_branch":"main"}'
@@ -358,18 +364,85 @@ export PATH FM_TEST_ROLLUP FM_TEST_RUNS FM_TEST_JOBS FM_TEST_SHA FM_TEST_HEAD_RE
 URL=https://github.com/example/repo/pull/7
 verify() { "$ROOT/bin/fm-pr-ci-verify.sh" "$URL" 2>&1; }
 
-# --- the roster the repository under test asks for ---------------------------
+# --- the standard the repository under test asks for -------------------------
 #
-# The regression this whole change exists for: a roster held as a constant of
-# one repository's job names cannot be drifted into on a second repository, it
-# simply does not describe it, so every other project fails the completeness
-# test by construction. fm_ci_roster reads it from the repository instead.
-fm_ci_roster example/repo main || fail "a repository with a successful CI run must yield a roster"
+# The regression this whole change exists for, in both halves: a standard held
+# as a constant of one repository's answer cannot be drifted into on a second
+# repository, it simply does not describe it, so every other project fails by
+# construction. fm_ci_roster reads both from the repository instead.
+fm_ci_roster example/repo main || fail "a repository with a successful push run must yield a standard"
 [ "$FM_CI_ROSTER" = "$(printf '%s' "$ROSTER" | jq -c 'unique')" ] \
   || fail "the roster must be the job names of that run, got: $FM_CI_ROSTER"
 assert_contains "$FM_CI_ROSTER_SOURCE" "5150" "the roster must say which run it came from"
 assert_contains "$FM_CI_ROSTER_SOURCE" "example/repo" "the roster must say which repository it came from"
-pass "fm_ci_roster reads the required suite roster from the repository under test"
+[ "$FM_CI_WORKFLOWS" = '["CI"]' ] \
+  || fail "the gate must be the workflows that validated the branch, got: $FM_CI_WORKFLOWS"
+assert_contains "$FM_CI_WORKFLOWS_SOURCE" "example/repo" "the gate must say which repository it came from"
+pass "fm_ci_roster reads the gating workflows and the required suite roster from the repository under test"
+
+# The defect this change closes, at the level of the classifier: a repository
+# whose gate is a workflow named anything but "CI". Nothing here is special
+# about the name - which is the point, because the name it used to be compared
+# against was this repository's own.
+BRANCH_RUNS_DEFAULT=$FM_TEST_BRANCH_RUNS
+ROSTER_JOBS_CI=$FM_TEST_ROSTER_JOBS
+FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"}]}'
+FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
+fm_ci_roster example/repo main \
+  || fail "a repository whose gate is not named CI must still yield a standard"
+[ "$FM_CI_WORKFLOWS" = '["lint"]' ] \
+  || fail "the gate must follow the repository, got: $FM_CI_WORKFLOWS"
+[ "$FM_CI_ROSTER" = '["lint"]' ] \
+  || fail "the roster must come from that workflow, got: $FM_CI_ROSTER"
+LINT_ROLLUP='[{"__typename":"CheckRun","workflowName":"lint","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}]'
+GOT=$(fm_ci_checks_state "$LINT_ROLLUP" "$FM_CI_ROSTER" "$FM_CI_WORKFLOWS")
+[ "$GOT" = passing ] \
+  || fail "a green rollup from a gate named lint must be passing, got: $GOT"
+# The same rollup judged against a gate that does not name it is the bug: every
+# conclusion is discarded before the roster is ever consulted, and no roster can
+# put them back.
+[ "$(fm_ci_checks_state "$LINT_ROLLUP" '["lint"]' '["CI"]')" = no-repo-ci ] \
+  || fail "a gate naming the wrong workflow must discard the rollup, which is the defect"
+pass "a repository whose gating workflow is not named CI is judged by its own gate"
+
+# A gate of more than one workflow requires all of them, and the roster is the
+# union of what each reported: a repository gated by two workflows is not green
+# on one of them.
+FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"},{"id":8802,"name":"typecheck"}]}'
+FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
+fm_ci_roster example/repo main || fail "two gating workflows must still yield a standard"
+[ "$FM_CI_WORKFLOWS" = '["lint","typecheck"]' ] \
+  || fail "both gating workflows must be in the gate, got: $FM_CI_WORKFLOWS"
+assert_contains "$FM_CI_ROSTER_SOURCE" "8801" "the roster provenance must name the first run it came from"
+assert_contains "$FM_CI_ROSTER_SOURCE" "8802" "the roster provenance must name the second run it came from"
+[ "$(fm_ci_checks_state "$LINT_ROLLUP" '["lint","typecheck"]' "$FM_CI_WORKFLOWS")" = incomplete ] \
+  || fail "a rollup carrying one of two gating workflows must be incomplete"
+FM_TEST_BRANCH_RUNS=$BRANCH_RUNS_DEFAULT
+FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_CI
+pass "a repository gated by more than one workflow requires every one of them"
+
+# A workflow the repository owns but never runs on a push to the target branch
+# is not its gate. A release workflow run by hand on main - the shape
+# x45dev/agent-standards actually has - would otherwise drag its release jobs
+# into the roster of every pull request. The query itself is what excludes it,
+# so the fixture is what that query returns.
+FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"}]}'
+FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
+fm_ci_roster example/repo main || fail "the gate must resolve from the push runs alone"
+[ "$FM_CI_WORKFLOWS" = '["lint"]' ] \
+  || fail "only the workflows in the push-run reply may be the gate, got: $FM_CI_WORKFLOWS"
+FM_TEST_BRANCH_RUNS=$BRANCH_RUNS_DEFAULT
+FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_CI
+pass "only a workflow the repository ran on a push to the target branch is in its gate"
+
+# An unestablished gate is "could not verify", never "nothing gates this
+# repository": with no names to match, every check in a green rollup reads as
+# somebody else's, and the one answer that must never come back is passing.
+[ "$(fm_ci_checks_state "$(complete_suite)" "$ROSTER" '[]')" = incomplete ] \
+  || fail "a rollup judged against an empty gate must be incomplete"
+[ "$(fm_ci_run_jobs_state "[$(run 42 completed '"success"')]" "$COMPLETE_JOBS" "$ROSTER" '[]')" = incomplete ] \
+  || fail "a run judged against an empty gate must be incomplete"
+pass "an empty gate costs a verdict rather than granting one, in both shapes"
 
 # The proof that it is the repository's roster and not a built-in one: a second
 # repository with entirely different job names yields entirely different names.
@@ -396,18 +469,13 @@ pass "fm_ci_roster falls back to the repository default branch when none is name
 # Every way the lookup can come up empty is a refusal, never an empty roster:
 # a caller cannot tell an empty roster apart from a repository that requires
 # nothing, and against an empty roster every green rollup reads as passing.
-WORKFLOWS_DEFAULT=$FM_TEST_WORKFLOWS
-CI_RUNS_DEFAULT=$FM_TEST_CI_RUNS
-FM_TEST_WORKFLOWS='{"total_count":1,"workflows":[{"id":9,"name":"Require no-mistakes"}]}'
+RUNS_DEFAULT=$FM_TEST_BRANCH_RUNS
+FM_TEST_BRANCH_RUNS='{"workflow_runs":[]}'
 fm_ci_roster example/repo main 2>/dev/null \
-  && fail "a repository with no CI workflow must be refused, not given an empty roster"
+  && fail "a repository that has validated no push to the branch must be refused"
 [ -z "$FM_CI_ROSTER" ] || fail "a refused lookup must leave no roster behind"
-FM_TEST_WORKFLOWS=$WORKFLOWS_DEFAULT
-
-FM_TEST_CI_RUNS='{"workflow_runs":[]}'
-fm_ci_roster example/repo main 2>/dev/null \
-  && fail "a repository with no successful CI run must be refused"
-FM_TEST_CI_RUNS=$CI_RUNS_DEFAULT
+[ -z "$FM_CI_WORKFLOWS" ] || fail "a refused lookup must leave no gate behind"
+FM_TEST_BRANCH_RUNS=$RUNS_DEFAULT
 
 FM_TEST_ROSTER_JOBS='{"total_count":0,"jobs":[]}'
 fm_ci_roster example/repo main 2>/dev/null \
@@ -418,6 +486,7 @@ fm_ci_roster example/repo main 2>/dev/null \
 FM_TEST_ROSTER_JOBS='{"total_count":140,"jobs":[{"name":"Lint"}]}'
 fm_ci_roster example/repo main 2>/dev/null \
   && fail "a run with more jobs than one page can name must be refused, not truncated"
+[ -z "$FM_CI_WORKFLOWS" ] || fail "a refused lookup must leave no gate behind either"
 FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_DEFAULT
 pass "every roster lookup that cannot name the whole roster refuses instead of returning a short one"
 
@@ -427,24 +496,85 @@ pass "every roster lookup that cannot name the whole roster refuses instead of r
 FM_CI_REQUIRED_SUITES='["only-this"]'
 fm_ci_roster example/repo main || fail "an explicit roster override must be honoured"
 [ "$FM_CI_ROSTER" = '["only-this"]' ] || fail "the override must be the roster, got: $FM_CI_ROSTER"
+[ "$FM_CI_WORKFLOWS" = '["CI"]' ] \
+  || fail "a roster override must still leave the gate resolved, got: $FM_CI_WORKFLOWS"
 FM_CI_REQUIRED_SUITES='"Lint"'
 fm_ci_roster example/repo main 2>/dev/null \
   && fail "an override that is not an array of job names must be refused"
 unset FM_CI_REQUIRED_SUITES
 pass "FM_CI_REQUIRED_SUITES overrides the lookup, and a malformed override is refused"
 
+# The same escape hatch for the other half, for a repository whose gate the
+# push-run rule gets wrong. On its own it still takes the roster from that
+# workflow's observed runs, so a named workflow the branch never validated is a
+# refusal rather than a workflow silently contributing no suites at all.
+# Exported because it is an environment override by contract, and unset again
+# at the end of the block so no later subprocess inherits it.
+export FM_CI_GATING_WORKFLOWS
+FM_CI_GATING_WORKFLOWS='["CI"]'
+fm_ci_roster example/repo main || fail "an explicit gate override must be honoured"
+[ "$FM_CI_WORKFLOWS" = '["CI"]' ] || fail "the override must be the gate, got: $FM_CI_WORKFLOWS"
+[ "$FM_CI_ROSTER" = "$(printf '%s' "$ROSTER" | jq -c 'unique')" ] \
+  || fail "an overridden gate must still take its roster from that workflow's run"
+FM_CI_GATING_WORKFLOWS='["never-ran"]'
+fm_ci_roster example/repo main 2>/dev/null \
+  && fail "a gate naming a workflow the branch never validated must be refused"
+[ -z "$FM_CI_WORKFLOWS" ] || fail "that refusal must leave no gate behind"
+FM_CI_GATING_WORKFLOWS='"CI"'
+fm_ci_roster example/repo main 2>/dev/null \
+  && fail "a gate override that is not an array of workflow names must be refused"
+# Both halves named outright is the only combination that reaches no network at
+# all, so it is the only one a repository the stub does not serve can answer.
+FM_CI_GATING_WORKFLOWS='["gate"]'
+FM_CI_REQUIRED_SUITES='["suite"]'
+fm_ci_roster unknown/repo main || fail "both overrides together must not consult the repository"
+[ "$FM_CI_WORKFLOWS" = '["gate"]' ] && [ "$FM_CI_ROSTER" = '["suite"]' ] \
+  || fail "both overrides must be the standard, got: $FM_CI_WORKFLOWS / $FM_CI_ROSTER"
+unset FM_CI_GATING_WORKFLOWS FM_CI_REQUIRED_SUITES
+pass "FM_CI_GATING_WORKFLOWS overrides the gate, refusing a workflow the branch never validated"
+
 # A repository whose roster cannot be established is refused outright rather
 # than judged against somebody else's, even with a rollup that is entirely
 # green.
 FM_TEST_ROLLUP=$(complete_suite)
-FM_TEST_WORKFLOWS='{"total_count":0,"workflows":[]}'
+FM_TEST_BRANCH_RUNS='{"workflow_runs":[]}'
 OUT=$(verify); CODE=$?
-FM_TEST_WORKFLOWS=$WORKFLOWS_DEFAULT
-[ "$CODE" = 1 ] || fail "an unestablished roster must refuse a verdict, exited $CODE: $OUT"
+FM_TEST_BRANCH_RUNS=$RUNS_DEFAULT
+[ "$CODE" = 1 ] || fail "an unestablished standard must refuse a verdict, exited $CODE: $OUT"
 assert_contains "$OUT" "could not establish what example/repo requires" \
   "the refusal must say the standard is missing, not that the checks failed"
-assert_not_contains "$OUT" "validated:" "an unestablished roster must never produce a green verdict"
-pass "fm-pr-ci-verify.sh refuses a pull request whose repository roster it could not establish"
+assert_not_contains "$OUT" "validated:" "an unestablished standard must never produce a green verdict"
+pass "fm-pr-ci-verify.sh refuses a pull request whose repository standard it could not establish"
+
+# The end-to-end proof for the repository this change exists for: a green pull
+# request whose gate is a workflow named lint, refused by the constant and
+# accepted once the gate follows the repository.
+FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"}]}'
+FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
+FM_TEST_ROLLUP=$LINT_ROLLUP
+OUT=$(verify); CODE=$?
+[ "$CODE" = 0 ] || fail "a green pull request gated by lint must be accepted, exited $CODE: $OUT"
+assert_contains "$OUT" "gating workflows: lint" "the verdict must name the gate it resolved"
+assert_contains "$OUT" "validated:" "the verdict must state that the commit was validated"
+pass "fm-pr-ci-verify.sh verifies a repository whose whole pull request gate is a workflow named lint"
+
+# The same repository with that one gating check red is still red, and with it
+# absent is still not green: the gate following the repository must not have
+# turned either of the other two outcomes into a pass.
+FM_TEST_ROLLUP='[{"__typename":"CheckRun","workflowName":"lint","name":"lint","status":"COMPLETED","conclusion":"FAILURE"}]'
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a red lint gate must be refused, exited $CODE: $OUT"
+assert_contains "$OUT" "failing" "the refusal must name the failing state"
+assert_not_contains "$OUT" "validated:" "a red gate must never be reported as validated"
+FM_TEST_ROLLUP="$ONLY_BOT"
+FM_TEST_RUNS='[]'
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a lint gate that never ran must be refused, exited $CODE: $OUT"
+assert_contains "$OUT" "no-repo-ci" "the refusal must name the state"
+assert_not_contains "$OUT" "validated:" "a gate that never ran must never be reported as validated"
+FM_TEST_BRANCH_RUNS=$RUNS_DEFAULT
+FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_DEFAULT
+pass "the three outcomes stay distinct on a repository whose gate is not named CI"
 
 # The whole verdict, driven off the repository's own roster end to end.
 FM_TEST_ROLLUP=$(printf '%s' "$OTHER_JOBS" \
