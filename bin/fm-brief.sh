@@ -49,6 +49,12 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every task brief (all three ship modes and the scout contract) opens with the
+# privacy marking: the brief is private fleet material, never quoted into a
+# project artifact or cited as project truth, and reproduced publicly only where
+# the brief names an explicit exception. The no-mistakes DOD's --intent
+# instruction is that exception and carries its own publication rule, because
+# no-mistakes prepends the intent verbatim into the published PR body.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -195,6 +201,14 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# The privacy marking, included near the top of every task brief (all three ship
+# modes and the scout contract). Brief text carries no marker distinguishing it
+# from project truth or from publishable text, so a worker can quote it into a
+# project artifact or cite it as the project's own instruction. This line is the
+# marker; the no-mistakes DOD's --intent instruction is the one place that then
+# names an explicit, bounded publication exception and gives it its own rule.
+PRIVACY_NOTICE="This brief is private fleet material: never quote it into a project artifact, never cite it as project truth, and reproduce it publicly only where this brief explicitly says to, under the publication rule that instruction carries."
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -321,6 +335,7 @@ fi
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+$PRIVACY_NOTICE
 
 # Task
 {TASK}
@@ -413,7 +428,10 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+When starting no-mistakes, make \`--intent\` carry every requirement, constraint, exclusion, rejected alternative, and accepted decision in this brief's \`# Task\` section, plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+That intent is this brief's one publication exception: no-mistakes publishes it verbatim as the pull request's \`## Intent\` section in the project's own repository, so write it for a reader there.
+Writing it for that reader means carrying no path outside the project, no fleet role or process noun, and no internal decision history that means nothing in that repository; where a decision's provenance matters, give it without naming who made it.
+It never means carrying less: the pipeline's reviewer treats the intent as authoritative acceptance criteria, so a thinned intent stays authoritative while becoming incomplete, and every element above must survive being rewritten for that reader.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
@@ -438,6 +456,7 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+$PRIVACY_NOTICE
 
 # Task
 {TASK}

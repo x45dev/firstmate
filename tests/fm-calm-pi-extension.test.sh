@@ -1817,9 +1817,28 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
+    # The session file records the completed turn before the terminal has
+    # finished painting it, so capturing the pane straight off that signal can
+    # read a pane that still shows only the startup banner and count zero
+    # occurrences. replay_exact_case below already waits on the pane itself;
+    # wait the same way here, then capture once for the count and geometry
+    # assertions. This bounds the wait rather than removing the assertion: a
+    # genuinely duplicated answer still renders twice and still fails.
+    i=0
+    while [ "$i" -lt 240 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" \
+        && printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+        break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
+
     pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-    [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered a duplicate captain answer"
+    captain_answers=$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)
+    [ "$captain_answers" -eq 1 ] \
+      || fail "Pi follow-up $label case rendered the captain answer $captain_answers times, expected exactly 1"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
