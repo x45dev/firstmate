@@ -34,6 +34,13 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
+# Every ship mode's definition of done names exactly ONE completion point, so a
+# worker never has an earlier place it can correctly stop: direct-PR and
+# local-only reach theirs in one step, and no-mistakes runs the implementation
+# commit and the pipeline as one continuous stage whose only `done:` is the PR
+# with CI green. The implementation commit is reported as a nonterminal
+# `working:` line instead, because a branch that the pipeline has not pushed yet
+# lives only in the disposable worktree.
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -422,9 +429,12 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This task ships **no-mistakes**: one continuous stage running from the implementation commit through the pipeline to a PR with CI green.
+That whole stage has exactly ONE completion point, and it is the last paragraph of this section.
+A committed branch is the halfway mark of the stage, never a finish: until the pipeline pushes, the deliverable exists only in this disposable worktree, so a task stopped there is one that can be discarded rather than one that is done.
+When the implementation is committed, append \`working: implemented, starting validation\` to the status file and invoke /no-mistakes yourself without ending the turn.
+That line is the progress report for this phase - nonterminal under rule 4 - so there is no \`done:\` to append here, nothing to hand over, and nothing to wait for.
+If firstmate later tells you to run /no-mistakes, that confirms the run you already started: report the gate it is sitting on rather than starting a second run.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -444,7 +454,7 @@ After /no-mistakes reports CI green (the CI-ready return point - do not wait for
 An all-green check list is not evidence the suites ran: a pull request can carry only a third-party bot's pass while every repository suite is still held unapproved, which reads as "1 passed, 0 failed" to anything that counts conclusions.
 That command answers the real question, and accepts a commit our own fork already validated.
 If it refuses, report what it says instead of a green result.
-Once it passes, append \`done: PR {url} checks green\` and stop. You are finished.
+Once it passes, append \`done: PR {url} checks green\` and stop. You are finished, and this is the one completion point named above.
 EOF
     ;;
 esac
