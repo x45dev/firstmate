@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "This task ships **no-mistakes**" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -317,6 +317,115 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "make \`--intent\` carry every requirement" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
+}
+
+# Print the generated brief's Definition of done section (it is the brief's last
+# section, so "from the heading to EOF" is the whole contract a worker reads as
+# its finish line).
+dod_section() {
+  sed -n '/^# Definition of done$/,$p' "$1"
+}
+
+# Count the definition of done's COMPLETION instructions: lines that tell the
+# worker to append a `done:` line and stop. Escalation stops (rule 6's ask-user
+# hand-back) are deliberately not counted - they end a turn, not the task.
+count_completion_gates() {
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  dod_section "$1" | grep -c 'append `done:' || true
+}
+
+# The five measured failures this guards (two in one home 2026-09-01, three in a
+# single session 2026-09-07, which was every no-mistakes ship task dispatched
+# that session): the no-mistakes DOD defined TWO `done:` gates, and the first
+# told the worker to stop with its branch committed locally, pushed nowhere and
+# no PR open. Each worker followed the brief exactly and reported a finished task
+# whose deliverable existed only in a disposable worktree, one of them calling it
+# "landed". Emphasis had already failed five times, so what is pinned here is the
+# SHAPE: one completion point per ship mode, and for no-mistakes it must be the
+# PR rather than the local commit, with the implementation commit demoted to a
+# nonterminal `working:` report that does not end the turn.
+test_ship_dod_names_exactly_one_completion_point() {
+  local home id mode brief gates
+  home="$TMP_ROOT/one-completion-point-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "brief-onegate-nm:no-mistakes" "brief-onegate-dpr:direct-PR" "brief-onegate-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    gates=$(count_completion_gates "$brief")
+    [ "$gates" = 1 ] \
+      || fail "$mode: definition of done names $gates completion points; a ship brief must name exactly one"
+  done
+
+  # The one no-mistakes completion point must be the PR with CI green, not the
+  # local commit, and the superseded first gate must be gone rather than reworded.
+  brief="$home/data/brief-onegate-nm/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  dod_section "$brief" | grep -F 'append `done:' | grep -qF 'done: PR {url} checks green' \
+    || fail "no-mistakes: the single completion point is not the PR with CI green"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes DOD still tells the worker to report done at the local commit"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD still hands the task back at the implementation commit"
+
+  # The implementation commit is still reported - as progress, in the scaffold's
+  # existing nonterminal vocabulary, with the worker continuing into the pipeline.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `working: implemented, starting validation`' "$brief" \
+    "no-mistakes DOD lost the nonterminal progress report for the implementation commit"
+  assert_grep "invoke /no-mistakes yourself without ending the turn" "$brief" \
+    "no-mistakes DOD must carry the worker into the pipeline instead of stopping"
+  assert_grep "exactly ONE completion point" "$brief" \
+    "no-mistakes DOD must state that it defines a single completion point"
+
+  # The other two modes end where their delivery path actually ends.
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: PR {url}`' "$home/data/brief-onegate-dpr/brief.md" \
+    "direct-PR: single completion point must be the open PR"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: ready in branch fm/brief-onegate-lo`' "$home/data/brief-onegate-lo/brief.md" \
+    "local-only: single completion point must be the ready branch"
+  pass "fm-brief.sh: every ship mode's definition of done names exactly one completion point"
+}
+
+# The completion point is only worth one gate if the supervision classifier reads
+# it the same way the brief does, so the two status lines the no-mistakes DOD
+# actually instructs are taken from the generated brief and put through
+# bin/fm-classify-lib.sh itself: the mid-stage progress report must stay
+# nonterminal (an unfinished task must never classify as done) and the single
+# completion line must stay a terminal captain verb (a finished one must).
+test_dod_status_lines_classify_as_the_brief_promises() {
+  local home id brief progress completion
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  home="$TMP_ROOT/dod-classification-home"
+  mkdir -p "$home/data"
+  id="brief-dod-classify"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes brief should scaffold"
+  brief="$home/data/$id/brief.md"
+
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  progress=$(dod_section "$brief" | sed -n 's/.*append `\(working: [^`]*\)`.*/\1/p' | head -1)
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  completion=$(dod_section "$brief" | sed -n 's/.*append `\(done: [^`]*\)`.*/\1/p' | head -1)
+  completion=${completion//\{url\}/https://example.invalid/pr/1}
+  [ -n "$progress" ] || fail "no-mistakes DOD names no mid-stage progress line to classify"
+  [ -n "$completion" ] || fail "no-mistakes DOD names no completion line to classify"
+
+  ! status_is_terminal_verb "$progress" \
+    || fail "the mid-stage progress line '$progress' classifies as terminal"
+  ! status_is_captain_relevant "$progress" \
+    || fail "the mid-stage progress line '$progress' would wake the captain as finished work"
+  status_is_terminal_verb "$completion" \
+    || fail "the completion line '$completion' does not classify as terminal"
+  status_is_captain_relevant "$completion" \
+    || fail "the completion line '$completion' would not reach the captain as finished work"
+  pass "fm-brief.sh: the DOD's progress and completion lines classify as nonterminal and terminal"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -807,6 +916,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_ship_dod_names_exactly_one_completion_point
+test_dod_status_lines_classify_as_the_brief_promises
 test_privacy_marking_opens_every_task_brief
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
