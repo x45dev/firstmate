@@ -355,7 +355,7 @@ fm_ci_gh() {
 # Anchored at column 0 because a top-level key is the only place `on:` can be:
 # block scalar content is always indented under its own key, so no column-0
 # match can be inside one.
-FM_CI_WORKFLOW_ON_AWK=$(cat <<'AWK'
+read -r -d '' FM_CI_WORKFLOW_ON_AWK <<'AWK' || true
 function trim(s) { sub(/^[[:blank:]]+/, "", s); sub(/[[:blank:]]+$/, "", s); return s }
 function dequote(s,   q) {
   if (length(s) > 1) {
@@ -437,7 +437,11 @@ state == 1 {
 }
 END { if (bad || n == 0) exit 1 }
 AWK
-)
+# read -d '' rather than $(cat <<'AWK' ... AWK) deliberately: stock macOS Bash
+# 3.2 miscounts quotes in a quoted heredoc's body when that heredoc sits inside
+# a command substitution, and this body's awk carries enough of them to trip
+# it - "unexpected EOF while looking for matching `\"'" with no such heredoc
+# in sight. read -d '' keeps the heredoc out of a substitution entirely.
 
 # fm_ci_workflow_events: read a workflow file on stdin and print the trigger
 # names its top-level `on:` declares, one per line. Returns 1, printing nothing,
