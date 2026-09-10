@@ -1,0 +1,6 @@
+{
+  "endpoints": [
+    { "url": "https://example.com/api/contact" },
+    { "url": "https://another-site.example/api/contact" }
+  ]
+}
