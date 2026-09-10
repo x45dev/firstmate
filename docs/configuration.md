@@ -415,6 +415,67 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Contact endpoint checks (config/watched-contacts.json)
+
+`config/watched-contacts.json` is an optional local, gitignored list of deployed contact endpoints this home proves are really the intake handler.
+When it is present and the check is armed, [`bin/fm-contact-live-check.sh`](../bin/fm-contact-live-check.sh) posts an empty JSON body to each one and requires HTTP 422 whose body names all four fields the real intake binds: `name`, `email`, `message`, and `turnstileToken`.
+
+The empty body is what makes the assertion safe to run against a live site on a schedule.
+Validation rejects it before anything happens, so the probe can never store a message, send mail, or spend challenge quota.
+
+`turnstileToken` is the field that carries the information.
+The contact stub that ships with the site template answers an empty body with the same 422 the real intake does, and binds `name`, `email` and `message`, so the status alone cannot tell a ported intake from a stub that was never replaced.
+Only the field list can.
+
+This check runs from the operator's own machine because the same assertion cannot be made from a cloud runner.
+A runner's request is answered by the edge with a managed challenge, so the check reads a challenge page where the API's answer belongs.
+That was measured to exhaustion on 2026-09-10 across four zones: a custom firewall rule written to let the request through did not change the answer, and widening one zone's rule to skip every product a rule can skip returned a byte-identical refusal, which places the refuser outside what a rule can reach.
+The same request from this machine returns the right answer from all four sites, verified the same day.
+So the check is local by design, and it sends no secret, credential, or header beyond the content type: its whole value is that nothing has to be in the way for it to work.
+
+The readings are kept deliberately distinct, because they name faults in different systems:
+
+- `<host> is running the contact stub, not the real intake` means a 422 named `name`, `email` and `message` but not `turnstileToken`.
+- `<host> has the contact stub refusing before it validates` means 501.
+- `<host> answered HTTP 503: the edge holds no origin secret, or the origin is down`.
+- `<host> was refused at the edge` means 403, or an HTML challenge or interstitial page where the intake answers JSON; the origin was never reached, so the answer says nothing about what is deployed.
+- `<host> is unreachable` means no HTTP answer at all: the name does not resolve, nothing accepted a connection, or the handshake failed.
+
+This section is the single owner of the canonical schema.
+`bin/fm-contact-live-check.sh` owns probe mechanics, cadence, and the report record.
+
+```json
+{
+  "endpoints": [
+    { "url": "<http or https url of the deployed contact endpoint>" }
+  ]
+}
+```
+
+Each entry needs only a `url`, which must carry a plain host and path with no user info, query, or fragment, and each url may appear once.
+The assertion itself is not configurable: what an endpoint has to answer is a property of the intake, not of this home, so only the list of endpoints lives here.
+A report line names the endpoint by its host, and adds the path when it is not the intake's own `/api/contact`, so two endpoints on one host never report as the same thing.
+A plain `http` url is accepted because the probe carries no secret, which lets an operator watch an origin directly to separate an edge fault from a deployment one.
+See [`docs/examples/watched-contacts.json`](examples/watched-contacts.json) for a starting point to copy into local `config/watched-contacts.json`.
+
+Arm the check once per home with `bin/fm-contact-live-check.sh arm`.
+That writes `state/contact-live.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule is involved.
+The armed check runs whenever that home has a watcher running, and arming alone does not make watcher supervision required.
+`bin/fm-contact-live-check.sh disarm` removes the shim, its trust binding, and the report record.
+
+The check prints nothing when every endpoint answers correctly, and `state/.contact-live` records the findings the last report was made from, keyed by endpoint, so the same failure is reported once instead of on every poll.
+That key is also what makes a failure that clears distinguishable from one that merely stopped being mentioned: an endpoint that had a finding and now answers correctly is reported as recovered, by name, once.
+An endpoint the sweep never reached, or one that has since been removed from the list, is never reported as recovered, because neither is evidence that it was fixed.
+Silence is this check's way of saying every endpoint answered correctly, so it is never also the way it says it could not run: an absent or malformed endpoint list is a reported finding, and `arm` refuses outright rather than arming a check that cannot answer.
+Adding, removing, or changing an endpoint is an edit to this file and needs no code change or re-arming.
+This file is not inherited by secondmate homes, so each home watches the endpoints it actually owns.
+
+`FM_CONTACT_CHECK_INTERVAL` (default 900 seconds, `0` to probe on every run) sets how often probes actually run, `FM_CONTACT_CHECK_PROBE_SECS` (default 8) bounds one request, and `FM_CONTACT_CHECK_BUDGET_SECS` (default 20) bounds a whole sweep.
+A sweep that runs out of budget says which endpoint it did not reach rather than reporting the rest as healthy, and an endpoint that hangs is cut off at its own bound and reported as unreachable.
+The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
+So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
+A budget that is not a whole number from 1 to 120 is still refused outright.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -664,6 +725,10 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_CONTACT_CHECK_INTERVAL=900   # seconds between contact endpoint sweeps; 0 probes on every run, other values must be 60..86400
+FM_CONTACT_CHECK_PROBE_SECS=8   # 1..30 seconds allowed for one contact endpoint request
+FM_CONTACT_CHECK_BUDGET_SECS=20   # 1..120 seconds allowed for a whole contact endpoint sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_CONTACT_CHECK_NOW=     # test override for the contact endpoint sweep clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
