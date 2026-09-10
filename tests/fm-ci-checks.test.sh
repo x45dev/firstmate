@@ -306,6 +306,103 @@ if fm_ci_run_jobs_state "$GOOD_RUN" '{"jobs":[]}' "$ROSTER" "$WORKFLOWS" >/dev/n
 fi
 pass "an unreadable runs or jobs payload is refused instead of being classified"
 
+# --- which workflows a pull request can trigger ------------------------------
+#
+# The gate is what a PULL REQUEST is held to, so a workflow no pull request can
+# produce must not be in it. That question is answered from the `on:` block the
+# workflow file declares, and only from the trigger NAMES in it, so this is a
+# small closed grammar rather than a YAML parser - and everything outside the
+# grammar is a refusal, because a trigger set this code cannot read is not
+# thereby empty.
+events_of() { printf '%s' "$1" | fm_ci_workflow_events; }
+pr_triggered() { printf '%s' "$1" | fm_ci_workflow_pr_triggered; }
+
+ON_BLOCK='name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs: {}
+'
+[ "$(events_of "$ON_BLOCK")" = "push
+pull_request" ] || fail "a block on: must yield its event names, got: $(events_of "$ON_BLOCK")"
+pr_triggered "$ON_BLOCK" || fail "a workflow declaring pull_request must read as pull-request triggered"
+
+# The shape this whole change exists for: a deploy triggered by a push to the
+# target branch and by workflow_dispatch, and by nothing else. Every landing
+# site built from one template has one, its jobs joined every roster, and no
+# pull request on those repositories could ever produce them.
+ON_DEPLOY='name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+'
+[ "$(events_of "$ON_DEPLOY")" = "push
+workflow_dispatch" ] || fail "a push-only deploy must yield its own two events"
+if pr_triggered "$ON_DEPLOY"; then
+  fail "a workflow triggered only by push and workflow_dispatch must not read as pull-request triggered"
+fi
+pass "a workflow file's declared triggers say whether a pull request can produce it at all"
+
+# pull_request_target is the other trigger a pull request fires, and a workflow
+# gated on it alone is as much a pull request gate as one using pull_request.
+pr_triggered 'on:
+  pull_request_target:
+' || fail "pull_request_target must count as pull-request triggered"
+
+# The spellings a workflow file is really written in. The last is the one a YAML
+# 1.1 round-trip produces, because that revision reads a bare `on` as the
+# boolean true and a tool that rewrote the file will have written the key back
+# as `true`.
+pr_triggered 'on: [push, pull_request]' || fail "a flow sequence on: must be read"
+pr_triggered 'on: pull_request' || fail "a scalar on: must be read"
+pr_triggered 'on:
+  - push
+  - pull_request
+' || fail "a block sequence on: must be read"
+pr_triggered '"on":
+  pull_request:
+    types: [opened, synchronize]
+' || fail "a quoted on: key must be read"
+pr_triggered 'true:
+  pull_request:
+' || fail "the YAML 1.1 spelling of the on: key must be read"
+if pr_triggered 'on: push  # main only'; then
+  fail "an inline comment must not be read as part of the event name"
+fi
+pass "every spelling of an on: block this grammar accepts is read the same way"
+
+# Everything the grammar does not read is a refusal - answer 2, distinct from
+# the no it gives a push-only workflow, because a caller may drop a no from the
+# gate but must refuse outright on a cannot-read. A suite this code cannot
+# classify is not thereby optional.
+# shellcheck disable=SC2016 # The last shape is an unexpanded Actions expression,
+# which is the point: a trigger name that is a template is not a trigger name.
+for shape in 'on: {push: null, pull_request: null}' \
+             'on: &anchor
+  pull_request:
+' \
+             'on:
+	pull_request:
+' \
+             'name: CI
+jobs: {}
+' \
+             'on:
+  ${{ matrix.trigger }}:
+'; do
+  rc=0
+  pr_triggered "$shape" || rc=$?
+  [ "$rc" = 2 ] \
+    || fail "an on: block outside the grammar must refuse rather than answer, got rc=$rc for: $shape"
+  events_of "$shape" >/dev/null 2>&1 \
+    && fail "an on: block outside the grammar must yield no event names: $shape"
+done
+pass "an on: block the grammar cannot read is refused, never read as declaring nothing"
+
 # --- the guard ---------------------------------------------------------------
 
 # gh is stubbed for every read on the path - the pull request itself, the
@@ -318,8 +415,24 @@ cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = api ]; then
   case "${2:-}" in
+    # What the base repository owns now: the identity, current name and state of
+    # every workflow a run in the history could belong to.
+    repos/example/repo/actions/workflows*)   printf '%s\n' "${FM_TEST_WORKFLOWS:-}" ;;
+    # A candidate's own workflow file, which is where its declared triggers are
+    # read from. A file the fixture did not write is one that cannot be read,
+    # which is how the unreadable case is staged.
+    repos/example/repo/contents/*)
+      wf_path=${2#*contents/}
+      wf_path=${wf_path%%\?*}
+      if [ -f "${FM_TEST_WF_DIR:-}/${wf_path##*/}" ]; then
+        jq -Rs '{content: @base64}' < "$FM_TEST_WF_DIR/${wf_path##*/}"
+      else
+        echo "gh: Not Found (HTTP 404)" >&2
+        exit 1
+      fi
+      ;;
     repos/example/repo/actions/runs/*/jobs*) printf '%s\n' "${FM_TEST_ROSTER_JOBS:-}" ;;
-    # The one query both halves of the standard are read from: the base
+    # The one query the candidates and the roster are both read from: the base
     # repository's successful push runs on the target branch.
     repos/example/repo/actions/runs*)        printf '%s\n' "${FM_TEST_BRANCH_RUNS:-}" ;;
     repos/example/repo)                      printf '%s\n' "${FM_TEST_REPO_META:-}" ;;
@@ -341,6 +454,53 @@ fi
 SH
 chmod +x "$FAKEBIN/gh"
 PATH="$FAKEBIN:$PATH"
+
+# The repository under test, described once and expanded into the three replies
+# the resolution reads: the workflow list, the successful push runs, and the
+# workflow file each candidate's triggers are read from. Each argument is
+# "<name>|<run id>|<the events its on: block declares, comma separated>". An
+# empty event list writes no file at all, which is how a workflow whose triggers
+# cannot be read is staged; the literal word "unparseable" writes a file whose
+# on: block is a shape the grammar refuses.
+WFDIR="$TMP/workflows"
+mkdir -p "$WFDIR"
+export FM_TEST_WF_DIR=$WFDIR
+repo_workflows() {
+  local spec name rest run events id=100 file event wf='[]' runs='[]'
+  rm -f "$WFDIR"/*
+  for spec in "$@"; do
+    name=${spec%%|*}
+    rest=${spec#*|}
+    run=${rest%%|*}
+    events=${rest#*|}
+    id=$((id + 1))
+    file="wf$id.yml"
+    wf=$(jq -cn --argjson a "$wf" --argjson id "$id" --arg n "$name" \
+      --arg p ".github/workflows/$file" \
+      '$a + [{id: $id, name: $n, path: $p, state: "active"}]')
+    runs=$(jq -cn --argjson a "$runs" --argjson id "$id" --arg n "$name" --argjson r "$run" \
+      '$a + [{id: $r, name: $n, workflow_id: $id}]')
+    case "$events" in
+      '') : ;;
+      unparseable) printf 'name: %s\non: {push: null}\n' "$name" > "$WFDIR/$file" ;;
+      *)
+        printf 'name: %s\non:\n' "$name" > "$WFDIR/$file"
+        while IFS= read -r event; do
+          [ -n "$event" ] || continue
+          printf '  %s:\n' "$event" >> "$WFDIR/$file"
+        done <<EVENTS
+$(printf '%s' "$events" | tr ',' '\n')
+EVENTS
+        ;;
+    esac
+  done
+  FM_TEST_WORKFLOWS=$(jq -cn --argjson w "$wf" '{total_count: ($w | length), workflows: $w}')
+  FM_TEST_BRANCH_RUNS=$(jq -cn --argjson r "$runs" '{workflow_runs: $r}')
+  export FM_TEST_WORKFLOWS FM_TEST_BRANCH_RUNS
+}
+# An ordinary repository: one gating workflow named CI that a pull request can
+# trigger, one successful push run of it on the target branch.
+repo_default() { repo_workflows "CI|5150|push,pull_request"; }
 # The stub is a separate process, so its inputs must be exported rather than
 # only set in this shell.
 FM_TEST_ROLLUP='[]'
@@ -352,10 +512,10 @@ FM_TEST_SHA=deadbeef
 FM_TEST_HEAD_REPO=
 FM_TEST_BASE_REF=main
 # What the base repository has successfully run on a push to main: one workflow
-# named CI, one run of it, and the roster of jobs that run carried. Both halves
-# of the standard are read from here, which is what the guard now asks the
+# named CI, one run of it, and the roster of jobs that run carried. The gate and
+# the roster are both read from here, which is what the guard now asks the
 # repository under test for instead of naming either half itself.
-export FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":5150,"name":"CI"}]}'
+repo_default
 export FM_TEST_ROSTER_JOBS
 FM_TEST_ROSTER_JOBS=$(printf '%s' "$ROSTER" | jq -c '{total_count: length, jobs: [.[] | {name: .}]}')
 export FM_TEST_REPO_META='{"default_branch":"main"}'
@@ -384,9 +544,8 @@ pass "fm_ci_roster reads the gating workflows and the required suite roster from
 # whose gate is a workflow named anything but "CI". Nothing here is special
 # about the name - which is the point, because the name it used to be compared
 # against was this repository's own.
-BRANCH_RUNS_DEFAULT=$FM_TEST_BRANCH_RUNS
 ROSTER_JOBS_CI=$FM_TEST_ROSTER_JOBS
-FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"}]}'
+repo_workflows "lint|8801|push,pull_request"
 FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
 fm_ci_roster example/repo main \
   || fail "a repository whose gate is not named CI must still yield a standard"
@@ -408,7 +567,7 @@ pass "a repository whose gating workflow is not named CI is judged by its own ga
 # A gate of more than one workflow requires all of them, and the roster is the
 # union of what each reported: a repository gated by two workflows is not green
 # on one of them.
-FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"},{"id":8802,"name":"typecheck"}]}'
+repo_workflows "lint|8801|push,pull_request" "typecheck|8802|push,pull_request"
 FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
 fm_ci_roster example/repo main || fail "two gating workflows must still yield a standard"
 [ "$FM_CI_WORKFLOWS" = '["lint","typecheck"]' ] \
@@ -417,7 +576,7 @@ assert_contains "$FM_CI_ROSTER_SOURCE" "8801" "the roster provenance must name t
 assert_contains "$FM_CI_ROSTER_SOURCE" "8802" "the roster provenance must name the second run it came from"
 [ "$(fm_ci_checks_state "$LINT_ROLLUP" '["lint","typecheck"]' "$FM_CI_WORKFLOWS")" = incomplete ] \
   || fail "a rollup carrying one of two gating workflows must be incomplete"
-FM_TEST_BRANCH_RUNS=$BRANCH_RUNS_DEFAULT
+repo_default
 FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_CI
 pass "a repository gated by more than one workflow requires every one of them"
 
@@ -426,14 +585,135 @@ pass "a repository gated by more than one workflow requires every one of them"
 # x45dev/agent-standards actually has - would otherwise drag its release jobs
 # into the roster of every pull request. The query itself is what excludes it,
 # so the fixture is what that query returns.
-FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"}]}'
+repo_workflows "lint|8801|push,pull_request"
 FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
 fm_ci_roster example/repo main || fail "the gate must resolve from the push runs alone"
 [ "$FM_CI_WORKFLOWS" = '["lint"]' ] \
   || fail "only the workflows in the push-run reply may be the gate, got: $FM_CI_WORKFLOWS"
-FM_TEST_BRANCH_RUNS=$BRANCH_RUNS_DEFAULT
+repo_default
 FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_CI
 pass "only a workflow the repository ran on a push to the target branch is in its gate"
+
+# The regression this change exists for, at the level of the resolution: a
+# repository whose deploy runs on a push to the target branch and on
+# workflow_dispatch, alongside a CI workflow a pull request can trigger. Before
+# the trigger test the deploy was indistinguishable from the gate, and its jobs
+# joined the roster every pull request was judged against - so every pull
+# request on four separate repositories was refused for missing deploy suites no
+# pull request there can ever produce, already-merged ones included.
+SITE_JOBS='{"total_count":3,"jobs":[{"name":"lint"},{"name":"test"},{"name":"e2e"}]}'
+repo_workflows "CI|9101|push,pull_request" "Deploy|9102|push,workflow_dispatch"
+FM_TEST_ROSTER_JOBS=$SITE_JOBS
+fm_ci_roster example/repo main || fail "a repository with a push-only deploy must still yield a standard"
+[ "$FM_CI_WORKFLOWS" = '["CI"]' ] \
+  || fail "a workflow no pull request can trigger must not gate one, got: $FM_CI_WORKFLOWS"
+[ "$FM_CI_ROSTER" = '["e2e","lint","test"]' ] \
+  || fail "the roster must hold only the suites a pull request can produce, got: $FM_CI_ROSTER"
+assert_not_contains "$FM_CI_ROSTER_SOURCE" "9102" \
+  "a dropped workflow's run must not be read for a roster at all"
+assert_contains "$FM_CI_WORKFLOWS_EXCLUDED" "Deploy" \
+  "the provenance must name the candidate that was set aside"
+assert_contains "$FM_CI_WORKFLOWS_EXCLUDED" "pull_request" \
+  "the provenance must say why it was set aside"
+pass "a workflow a pull request cannot trigger is dropped from the gate rather than demanded of one"
+
+# The same repository if every candidate is push-only: a refusal, never an empty
+# gate. An empty gate handed back would make every green rollup read as passing,
+# which is the one answer this whole file exists to prevent.
+repo_workflows "Deploy|9102|push,workflow_dispatch"
+fm_ci_roster example/repo main 2>/dev/null \
+  && fail "a repository no pull request can trigger a workflow of must be refused"
+[ -z "$FM_CI_WORKFLOWS" ] || fail "that refusal must leave no gate behind"
+[ -z "$FM_CI_ROSTER" ] || fail "that refusal must leave no roster behind"
+pass "a repository whose every candidate is push-only is refused rather than gated by nothing"
+
+# A candidate whose file cannot be read, and one whose on: block is a shape the
+# grammar refuses, are both refusals in their own right: a suite this code
+# cannot classify is not thereby optional, so the unreadable case can only ever
+# cost a verdict.
+repo_workflows "CI|9101|push,pull_request" "Mystery|9103|"
+fm_ci_roster example/repo main 2>/dev/null \
+  && fail "a candidate whose workflow file cannot be read must be refused"
+[ -z "$FM_CI_WORKFLOWS" ] || fail "an unreadable workflow file must leave no gate behind"
+repo_workflows "CI|9101|push,pull_request" "Mystery|9103|unparseable"
+fm_ci_roster example/repo main 2>/dev/null \
+  && fail "a candidate whose on: block cannot be read must be refused"
+[ -z "$FM_CI_WORKFLOWS" ] || fail "an unreadable on: block must leave no gate behind"
+pass "a candidate this code cannot classify refuses the whole standard rather than being dropped"
+
+# A workflow run records the name the workflow had WHEN IT RAN, so a rename
+# leaves older runs behind under the old name. Keyed on that name the old one
+# becomes a second gating workflow that no longer exists, demanding the jobs it
+# had before the rename - which is what x45dev/www.startrails.net's retired
+# "Deploy to Cloud Run" name was doing. Keyed on workflow identity both runs are
+# the one workflow, under the name it has now.
+repo_workflows "Deploy|9102|push,pull_request"
+FM_TEST_BRANCH_RUNS=$(printf '%s' "$FM_TEST_BRANCH_RUNS" | jq -c \
+  '.workflow_runs += [{id: 9001, name: "Deploy to Cloud Run", workflow_id: 101}]')
+export FM_TEST_BRANCH_RUNS
+FM_TEST_ROSTER_JOBS=$SITE_JOBS
+fm_ci_roster example/repo main || fail "a renamed workflow must still yield a standard"
+[ "$FM_CI_WORKFLOWS" = '["Deploy"]' ] \
+  || fail "a renamed workflow must be one candidate under its current name, got: $FM_CI_WORKFLOWS"
+assert_contains "$FM_CI_ROSTER_SOURCE" "9102" "the roster must come from the newest run of that workflow"
+assert_not_contains "$FM_CI_ROSTER_SOURCE" "9001" \
+  "the roster must not also be taken from the same workflow's older run under its old name"
+pass "a workflow renamed since an older run is one candidate under its current name, not two"
+
+# A workflow_id in the run history the repository no longer lists has been
+# deleted, so it cannot run on anything - the same finding as a push-only
+# trigger, reached one step earlier.
+repo_workflows "CI|9101|push,pull_request"
+FM_TEST_BRANCH_RUNS=$(printf '%s' "$FM_TEST_BRANCH_RUNS" | jq -c \
+  '.workflow_runs += [{id: 9004, name: "Retired", workflow_id: 777}]')
+export FM_TEST_BRANCH_RUNS
+fm_ci_roster example/repo main || fail "a deleted workflow in the run history must not refuse the standard"
+[ "$FM_CI_WORKFLOWS" = '["CI"]' ] \
+  || fail "a workflow the repository no longer owns must not gate a pull request, got: $FM_CI_WORKFLOWS"
+assert_contains "$FM_CI_WORKFLOWS_EXCLUDED" "Retired" \
+  "the provenance must name the deleted workflow it set aside"
+
+# A workflow the repository still lists but has switched off is the same
+# finding: it produces no run on a pull request either, and demanding it would
+# refuse every pull request for as long as it stays off.
+repo_workflows "CI|9101|push,pull_request" "Paused|9105|push,pull_request"
+FM_TEST_WORKFLOWS=$(printf '%s' "$FM_TEST_WORKFLOWS" | jq -c \
+  '.workflows |= map(if .name == "Paused" then .state = "disabled_manually" else . end)')
+export FM_TEST_WORKFLOWS
+fm_ci_roster example/repo main || fail "a disabled workflow must not refuse the standard"
+[ "$FM_CI_WORKFLOWS" = '["CI"]' ] \
+  || fail "a disabled workflow must not gate a pull request, got: $FM_CI_WORKFLOWS"
+assert_contains "$FM_CI_WORKFLOWS_EXCLUDED" "Paused" \
+  "the provenance must name the disabled workflow it set aside"
+pass "a workflow deleted from or disabled in the repository is dropped from the gate, not demanded from its old runs"
+
+# A workflow list that cannot name every workflow can only understate the gate,
+# so more than one page of them is refused rather than read from the first - the
+# same rule the job roster already holds one layer down.
+repo_workflows "CI|9101|push,pull_request"
+FM_TEST_WORKFLOWS=$(printf '%s' "$FM_TEST_WORKFLOWS" | jq -c '.total_count = 140')
+export FM_TEST_WORKFLOWS
+fm_ci_roster example/repo main 2>/dev/null \
+  && fail "a repository with more workflows than one page can name must be refused"
+[ -z "$FM_CI_WORKFLOWS" ] || fail "that refusal must leave no gate behind"
+pass "a workflow list one page cannot name refuses instead of resolving a gate from part of it"
+
+# The escape hatch, in the direction that matters now the resolution drops
+# things: naming the gate outright replaces the trigger test too, so an operator
+# can still demand a workflow a pull request cannot trigger.
+repo_workflows "CI|9101|push,pull_request" "Deploy|9102|push,workflow_dispatch"
+FM_TEST_ROSTER_JOBS=$SITE_JOBS
+export FM_CI_GATING_WORKFLOWS
+FM_CI_GATING_WORKFLOWS=$(jq -cn '["CI","Deploy"]')
+fm_ci_roster example/repo main || fail "a gate override naming a push-only workflow must be honoured"
+[ "$FM_CI_WORKFLOWS" = '["CI","Deploy"]' ] \
+  || fail "the override must put the push-only workflow back in the gate, got: $FM_CI_WORKFLOWS"
+[ -z "$FM_CI_WORKFLOWS_EXCLUDED" ] \
+  || fail "an overridden gate excludes nothing, so it must claim to have excluded nothing"
+unset FM_CI_GATING_WORKFLOWS
+repo_default
+FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_CI
+pass "FM_CI_GATING_WORKFLOWS still demands a workflow the trigger test drops"
 
 # An unestablished gate is "could not verify", never "nothing gates this
 # repository": with no names to match, every check in a green rollup reads as
@@ -469,13 +749,12 @@ pass "fm_ci_roster falls back to the repository default branch when none is name
 # Every way the lookup can come up empty is a refusal, never an empty roster:
 # a caller cannot tell an empty roster apart from a repository that requires
 # nothing, and against an empty roster every green rollup reads as passing.
-RUNS_DEFAULT=$FM_TEST_BRANCH_RUNS
-FM_TEST_BRANCH_RUNS='{"workflow_runs":[]}'
+repo_workflows
 fm_ci_roster example/repo main 2>/dev/null \
   && fail "a repository that has validated no push to the branch must be refused"
 [ -z "$FM_CI_ROSTER" ] || fail "a refused lookup must leave no roster behind"
 [ -z "$FM_CI_WORKFLOWS" ] || fail "a refused lookup must leave no gate behind"
-FM_TEST_BRANCH_RUNS=$RUNS_DEFAULT
+repo_default
 
 FM_TEST_ROSTER_JOBS='{"total_count":0,"jobs":[]}'
 fm_ci_roster example/repo main 2>/dev/null \
@@ -537,9 +816,9 @@ pass "FM_CI_GATING_WORKFLOWS overrides the gate, refusing a workflow the branch 
 # than judged against somebody else's, even with a rollup that is entirely
 # green.
 FM_TEST_ROLLUP=$(complete_suite)
-FM_TEST_BRANCH_RUNS='{"workflow_runs":[]}'
+repo_workflows
 OUT=$(verify); CODE=$?
-FM_TEST_BRANCH_RUNS=$RUNS_DEFAULT
+repo_default
 [ "$CODE" = 1 ] || fail "an unestablished standard must refuse a verdict, exited $CODE: $OUT"
 assert_contains "$OUT" "could not establish what example/repo requires" \
   "the refusal must say the standard is missing, not that the checks failed"
@@ -549,7 +828,7 @@ pass "fm-pr-ci-verify.sh refuses a pull request whose repository standard it cou
 # The end-to-end proof for the repository this change exists for: a green pull
 # request whose gate is a workflow named lint, refused by the constant and
 # accepted once the gate follows the repository.
-FM_TEST_BRANCH_RUNS='{"workflow_runs":[{"id":8801,"name":"lint"}]}'
+repo_workflows "lint|8801|push,pull_request"
 FM_TEST_ROSTER_JOBS='{"total_count":1,"jobs":[{"name":"lint"}]}'
 FM_TEST_ROLLUP=$LINT_ROLLUP
 OUT=$(verify); CODE=$?
@@ -572,9 +851,72 @@ OUT=$(verify); CODE=$?
 [ "$CODE" = 1 ] || fail "a lint gate that never ran must be refused, exited $CODE: $OUT"
 assert_contains "$OUT" "no-repo-ci" "the refusal must name the state"
 assert_not_contains "$OUT" "validated:" "a gate that never ran must never be reported as validated"
-FM_TEST_BRANCH_RUNS=$RUNS_DEFAULT
+repo_default
 FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_DEFAULT
 pass "the three outcomes stay distinct on a repository whose gate is not named CI"
+
+# --- the landing-site refusal, end to end ------------------------------------
+#
+# The whole guard against the repository shape this change exists for: a CI
+# workflow a pull request triggers, and a deploy that runs on a push to main and
+# on workflow_dispatch and on nothing else. The pull request carries every suite
+# its repository can produce and nothing else, which is exactly what a fully
+# checked pull request on such a repository looks like. Before the trigger test
+# this was refused for missing deploy-backend, deploy-edge and deploy-frontend -
+# on merged pull requests too, which is what proved the refusal structural.
+SITE_ROLLUP=$(printf '%s' "$SITE_JOBS" | jq -c \
+  '[.jobs[] | {"__typename":"CheckRun",workflowName:"CI",name:.name,status:"COMPLETED",conclusion:"SUCCESS"}]')
+site_repo() {
+  repo_workflows "CI|9101|push,pull_request" "Deploy|9102|push,workflow_dispatch"
+  FM_TEST_ROSTER_JOBS=$SITE_JOBS
+}
+site_repo
+FM_TEST_ROLLUP=$SITE_ROLLUP
+OUT=$(verify); CODE=$?
+[ "$CODE" = 0 ] \
+  || fail "a pull request carrying every suite its repository can produce must be accepted, exited $CODE: $OUT"
+assert_contains "$OUT" "validated:" "the verdict must state that the commit was validated"
+assert_contains "$OUT" "required suites: 3" "the roster must hold only the suites a pull request can produce"
+assert_contains "$OUT" "not gating: Deploy" \
+  "the verdict must say the deploy was considered and set aside, not silently ignored"
+assert_not_contains "$OUT" "deploy-backend" \
+  "no suite a pull request cannot produce may appear anywhere in the verdict"
+pass "fm-pr-ci-verify.sh verifies a pull request on a repository whose deploy workflow is push-only"
+
+# The same repository one repository-owned suite short. The trigger test may not
+# have widened anything: a roster that is genuinely incomplete is still refused,
+# and the refusal names the suite that is really missing rather than a deploy
+# job nothing could have produced.
+FM_TEST_ROLLUP=$(printf '%s' "$SITE_ROLLUP" | jq -c '[.[] | select(.name != "e2e")]')
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a pull request short of its own roster must still be refused, exited $CODE: $OUT"
+assert_contains "$OUT" "incomplete" "the refusal must name the incomplete state"
+assert_contains "$OUT" "e2e" "the refusal must name the repository suite that never reported"
+assert_not_contains "$OUT" "validated:" "a roster-short pull request must never be reported as validated"
+pass "a pull request short of the suites its repository can produce is still refused"
+
+# The same repository with one of those suites red.
+FM_TEST_ROLLUP=$(printf '%s' "$SITE_ROLLUP" | jq -c \
+  '[.[] | if .name == "test" then .conclusion = "FAILURE" else . end]')
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a red repository suite must still be refused, exited $CODE: $OUT"
+assert_contains "$OUT" "failing" "the refusal must name the failing state"
+assert_not_contains "$OUT" "validated:" "a red suite must never be reported as validated"
+pass "a red suite on a repository with a push-only deploy is still refused"
+
+# And the case nothing here may ever soften: no checks at all. An empty check
+# list reads exactly like a green one to anything counting conclusions, which is
+# the whole reason this command exists, so it stays a refusal on this repository
+# shape as on every other.
+FM_TEST_ROLLUP='[]'
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a pull request with no checks at all must still be refused, exited $CODE: $OUT"
+assert_not_contains "$OUT" "validated:" "an unchecked pull request must never be reported as validated"
+pass "zero checks is still a refusal on a repository whose deploy workflow is push-only"
+
+repo_default
+FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_DEFAULT
+FM_TEST_ROLLUP='[]'
 
 # The whole verdict, driven off the repository's own roster end to end.
 FM_TEST_ROLLUP=$(printf '%s' "$OTHER_JOBS" \
