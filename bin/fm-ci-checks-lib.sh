@@ -105,19 +105,24 @@
 # constant this file used to carry refused three separately hand-verified
 # repositories in one session before it was removed.
 #
-# fm_ci_roster derives the roster by OBSERVATION rather than by parsing
-# .github/workflows/: it reads the job names of the newest successful run of
-# each gating workflow on the branch the change is aimed at. The workflow file
-# is the
-# definition, but it is not a roster - a job name is a template evaluated by
-# GitHub ("Behavior portable serial ${{ matrix.shard }}", or a matrix.include
-# leg's "${{ matrix.name }}"), so turning that file into names means
-# reimplementing matrix expansion and the Actions expression language, and
-# getting either subtly wrong silently shortens the roster. GitHub has already
-# done that evaluation in every run it has recorded, exactly and for free.
-# Reading the run on the TARGET branch rather than on the branch under test is
-# deliberate for the same reason the roster exists at all: a branch that thins
-# its own workflow file would otherwise certify itself.
+# fm_ci_roster derives the roster by OBSERVATION rather than from the workflow
+# file: it reads the job names of the newest successful run of each gating
+# workflow on the branch the change is aimed at. The file is the definition, but
+# it is not a roster - a job name is a template evaluated by GitHub ("Behavior
+# portable serial ${{ matrix.shard }}", or a matrix.include leg's
+# "${{ matrix.name }}"), so turning that file into names means reimplementing
+# matrix expansion and the Actions expression language, and getting either
+# subtly wrong silently shortens the roster. GitHub has already done that
+# evaluation in every run it has recorded, exactly and for free. Reading the run
+# on the TARGET branch rather than on the branch under test is deliberate for
+# the same reason the roster exists at all: a branch that thins its own workflow
+# file would otherwise certify itself.
+#
+# The file is still read, but for a different question and only for the answer
+# it alone can give: which triggers a workflow DECLARES, so a workflow no pull
+# request can fire is not demanded of one. See the gate resolution below. A
+# trigger name is a literal in the file where a job name is a template, which is
+# why one is safe to read there and the other is not.
 #
 # "Repository-owned" alone is not enough evidence: a commit can carry a
 # passing check from some OTHER workflow that repository owns (a PR-body
@@ -143,31 +148,84 @@
 # $fm_ci_roster and is read one layer BELOW the workflow-name filter, so a
 # rollup emptied by that filter never reaches it.
 #
-# The resolution is observation, from the same query the roster is read from:
-# the workflows this repository has actually run to validate the TARGET branch,
-# taken from the successful PUSH runs on that branch. Reading the target branch
-# rather than the branch under test is deliberate for the same reason it is
-# there: a branch that deleted the gating workflow would otherwise certify
-# itself. Restricting to push runs is what separates a gate from the rest of a
-# repository's workflows, and it is a real discriminator rather than a
+# The resolution starts from observation, from the same query the roster is
+# read from: the workflows this repository has actually run to validate the
+# TARGET branch, taken from the successful PUSH runs on that branch. Reading the
+# target branch rather than the branch under test is deliberate for the same
+# reason it is there: a branch that deleted the gating workflow would otherwise
+# certify itself. Restricting to push runs is what separates a gate from the
+# rest of a repository's workflows, and it is a real discriminator rather than a
 # convenience - x45dev/agent-standards owns exactly two workflows, and the one
 # that gates its pull requests is the one that also runs on a push to main,
 # while its release workflow is workflow_dispatch only and would otherwise drag
 # its release jobs into the roster of every pull request.
 #
-# Two boundaries come with that, and both cost a verdict rather than granting
-# one. A workflow that runs ONLY on pull_request is not in the gate, because a
-# fork validating a commit on its own branch push can never produce such a run
-# and requiring one would refuse the head-repository evidence this file exists
-# to accept. And a workflow that runs on a push to the target branch but not on
-# pull requests - a deploy, a release-notes job - IS in the gate, so a pull
-# request carrying no run of it reads incomplete. FM_CI_GATING_WORKFLOWS is the
-# override for a repository either boundary gets wrong, the same escape hatch
-# FM_CI_REQUIRED_SUITES is for the roster.
+# Observation alone is not enough, because it answers a question one step to the
+# side of the one being asked. A successful push run proves a workflow validates
+# the target branch; it does not prove a PULL REQUEST can produce that workflow
+# at all. A deploy triggered by a push to main plus workflow_dispatch and by
+# nothing else is, on that evidence, indistinguishable from the gate, and its
+# jobs joined every roster - so every pull request on the four sites built from
+# one template was refused for missing deploy-backend, deploy-edge and
+# deploy-frontend, suites no pull request there can ever produce. It refused
+# already-merged pull requests identically, which is what proved the refusal
+# structural rather than a property of any one change. That is worse than the
+# inconvenience: ADR-0022 exists to keep "not checked" and "checked and green"
+# apart, and a guard that reports a fully checked pull request as unverified
+# stops carrying information and trains its reader to route around it.
+#
+# So each observed candidate is then asked whether a pull request can trigger it
+# at all, from the one place that answers it: the on: block the workflow file
+# declares at the target branch. A candidate declaring pull_request or
+# pull_request_target is in the gate; one declaring neither is not, because
+# demanding it of a pull request demands something unreachable rather than
+# something not-yet-run. Only the trigger NAMES are read - never a branches,
+# paths, or types filter under them - because evaluating those means
+# reimplementing GitHub filter semantics, the same trap that keeps the roster
+# out of the workflow file. A workflow whose pull_request trigger is filtered
+# away from this branch is therefore still demanded, which costs a verdict
+# rather than granting one, and FM_CI_GATING_WORKFLOWS is the escape hatch.
+#
+# Reading the file is what makes this test a declaration rather than a second
+# observation, and that matters in the direction that is dangerous. Deriving it
+# instead from which workflows have been seen on pull_request runs would drop a
+# genuine gate that simply has not run one inside the window, silently
+# shortening the standard - and a standard that is silently short hands out
+# passes that were not earned. A declaration cannot be short by accident: a file
+# that cannot be read, or an on: block this code cannot classify, is a REFUSAL
+# in its own right, because a suite this code cannot classify is not thereby
+# optional.
+#
+# Candidates are keyed by workflow identity rather than by the name a run
+# happens to carry, because a workflow run records the name the workflow had
+# WHEN IT RAN. Renaming one leaves its old runs behind under the old name, and
+# keying on that name invents a second gating workflow that no longer exists,
+# whose roster is the jobs it had before the rename. That is not hypothetical
+# either: x45dev/www.startrails.net renamed "Deploy to Cloud Run" to "Deploy",
+# and the old name went on demanding deploy-frontend, a job the workflow had
+# already dropped. Grouping the runs by workflow_id collapses both names onto
+# the one workflow, and its CURRENT name - the name GitHub will put on the check
+# runs a pull request produces - is taken from the repository workflow list. A
+# workflow_id in the run history that the workflow list no longer carries has
+# been deleted from the repository, so it cannot run on anything and is dropped
+# for the same reason a push-only workflow is.
+#
+# One boundary comes with all that, and it costs a verdict rather than granting
+# one. A workflow that runs ONLY on pull_request is not in the gate, because it
+# never produces a successful push run to be observed as a candidate - and
+# requiring one would refuse the head-repository evidence this file exists to
+# accept, since a fork validating a commit on its own branch push cannot produce
+# such a run either. The gate is therefore the workflows that do both: validate
+# the target branch on a push, and declare a trigger a pull request can fire.
+# FM_CI_GATING_WORKFLOWS is the override for a repository that boundary gets
+# wrong, the same escape hatch FM_CI_REQUIRED_SUITES is for the roster.
 #
 # The window is the newest 100 successful push runs on that branch. A workflow
 # that has not validated the branch inside it is not in the gate, which is the
-# bound this resolution accepts in exchange for answering in one API call.
+# bound this resolution accepts in exchange for one query. A repository owning
+# more than 100 workflows is refused rather than read from a first page, for the
+# same reason a second page of jobs is: a list that cannot name every candidate
+# can only understate the gate.
 #
 # A check or run that finished as SKIPPED, NEUTRAL, or STALE is also refused
 # rather than treated as passing: those conclusions mean the job never
@@ -290,6 +348,124 @@ fm_ci_gh() {
   gh "$@"
 }
 
+# The `on:` block of a workflow file, reduced to the trigger names it declares.
+# Only the names matter here - a branches, paths, or types filter under one is
+# deliberately not read - so this is a small, closed grammar rather than a YAML
+# parser, and it refuses everything outside that grammar instead of guessing.
+# Anchored at column 0 because a top-level key is the only place `on:` can be:
+# block scalar content is always indented under its own key, so no column-0
+# match can be inside one.
+FM_CI_WORKFLOW_ON_AWK=$(cat <<'AWK'
+function trim(s) { sub(/^[[:blank:]]+/, "", s); sub(/[[:blank:]]+$/, "", s); return s }
+function dequote(s,   q) {
+  if (length(s) > 1) {
+    q = substr(s, 1, 1)
+    if ((q == "\"" || q == "'") && substr(s, length(s), 1) == q)
+      s = substr(s, 2, length(s) - 2)
+  }
+  return s
+}
+function refuse() { bad = 1; exit 1 }
+function emit(e) {
+  e = dequote(trim(e))
+  if (e !~ /^[a-z][a-z0-9_]*$/) refuse()
+  print e
+  n++
+}
+BEGIN { state = 0; base = -1; kind = ""; n = 0; bad = 0 }
+{
+  line = $0
+  if (substr(line, length(line), 1) == "\r") line = substr(line, 1, length(line) - 1)
+  bare = line
+  sub(/^[[:blank:]]+/, "", bare)
+}
+# Looking for the top-level key. YAML 1.1 reads a bare `on` as the boolean true,
+# so a file written by a tool that round-tripped it can spell the key `true`.
+state == 0 {
+  if (bare == "" || substr(bare, 1, 1) == "#") next
+  if (line ~ /^[[:blank:]]/) next
+  if (line !~ /^("on"|'on'|on|true|True|TRUE)[[:blank:]]*:/) next
+  rest = line
+  sub(/^[^:]*:/, "", rest)
+  if (match(rest, /[[:blank:]]+#/)) rest = substr(rest, 1, RSTART - 1)
+  rest = trim(rest)
+  if (rest == "") { state = 1; next }
+  if (rest ~ /^\[.*\]$/) {
+    inner = substr(rest, 2, length(rest) - 2)
+    m = split(inner, part, ",")
+    for (i = 1; i <= m; i++) { p = trim(part[i]); if (p != "") emit(p) }
+    state = 2
+    next
+  }
+  # A flow mapping, an anchor, an alias, a tag, or a block scalar as the value
+  # of `on:` is legal YAML this grammar does not read, and a trigger set it
+  # cannot read is not thereby empty.
+  if (rest ~ /^[[{&*|>!]/) refuse()
+  emit(rest)
+  state = 2
+  next
+}
+# Inside the block. The events are the entries at its first indentation level,
+# as a mapping or as a sequence but never as both; anything deeper is one
+# event's own configuration and is skipped.
+state == 1 {
+  if (bare == "" || substr(bare, 1, 1) == "#") next
+  if (line ~ /^[^[:blank:]]/) { state = 2; next }
+  if (index(line, "\t") > 0) refuse()
+  match(line, /^ */)
+  ind = RLENGTH
+  if (base < 0) base = ind
+  if (ind > base) next
+  if (ind < base) refuse()
+  if (substr(bare, 1, 2) == "- ") {
+    if (kind == "map") refuse()
+    kind = "seq"
+    item = substr(bare, 3)
+    if (match(item, /[[:blank:]]+#/)) item = substr(item, 1, RSTART - 1)
+    emit(item)
+    next
+  }
+  if (match(bare, /^("[^"]+"|'[^']+'|[A-Za-z_][A-Za-z0-9_-]*)[[:blank:]]*:/)) {
+    if (kind == "seq") refuse()
+    kind = "map"
+    key = substr(bare, RSTART, RLENGTH)
+    sub(/[[:blank:]]*:$/, "", key)
+    emit(key)
+    next
+  }
+  refuse()
+}
+END { if (bad || n == 0) exit 1 }
+AWK
+)
+
+# fm_ci_workflow_events: read a workflow file on stdin and print the trigger
+# names its top-level `on:` declares, one per line. Returns 1, printing nothing,
+# when the declaration is not a shape it reads - which every caller must treat
+# as a refusal rather than as "this workflow declares no triggers".
+fm_ci_workflow_events() {
+  awk "$FM_CI_WORKFLOW_ON_AWK"
+}
+
+# fm_ci_workflow_pr_triggered: read a workflow file on stdin and answer whether a
+# pull request can trigger it. 0 yes, 1 no, 2 the triggers could not be read -
+# three answers rather than two, because a caller may drop a no from the gate
+# but must refuse outright on a cannot-read.
+fm_ci_workflow_pr_triggered() {
+  local events
+  events=$(fm_ci_workflow_events) || return 2
+  case "
+$events
+" in
+    *'
+pull_request
+'* | *'
+pull_request_target
+'*) return 0 ;;
+  esac
+  return 1
+}
+
 # Set by fm_ci_roster: the two halves of the standard a commit is judged
 # against - the gating workflow names and the required suite roster inside them
 # - each as a JSON array, and for each a human-readable phrase naming where it
@@ -298,34 +474,51 @@ fm_ci_gh() {
 # on stdout, the same way fm_pr_url_parse returns FM_PR_*, because a caller
 # reading them out of a command substitution would lose the provenance to the
 # subshell.
+#
+# FM_CI_WORKFLOWS_EXCLUDED is the same provenance for what is NOT in the gate:
+# the observed candidates dropped because no pull request can produce them,
+# each with the reason. Empty when nothing was dropped. A reader who cannot see
+# that a deploy was considered and set aside cannot tell this gate from one that
+# never noticed the deploy at all.
 FM_CI_WORKFLOWS=''
 FM_CI_WORKFLOWS_SOURCE=''
+FM_CI_WORKFLOWS_EXCLUDED=''
 FM_CI_ROSTER=''
 FM_CI_ROSTER_SOURCE=''
 
-# fm_ci_roster <repo> [<branch>]: resolve what <repo> requires of a commit into
-# FM_CI_WORKFLOWS, a JSON array of gating workflow names, and FM_CI_ROSTER, a
-# JSON array of the job display names those workflows are expected to report,
-# and set the two SOURCE variables to where each came from. <branch> is the
-# branch the change is aimed at, defaulting to the repository's own default
-# branch.
+# fm_ci_roster <repo> [<branch>]: resolve what <repo> requires of a pull request
+# into FM_CI_WORKFLOWS, a JSON array of gating workflow names, and FM_CI_ROSTER,
+# a JSON array of the job display names those workflows are expected to report,
+# and set the SOURCE variables to where each came from. <branch> is the branch
+# the change is aimed at, defaulting to the repository's own default branch.
 #
-# Both halves are read by OBSERVATION from one query: the repository's
-# successful PUSH runs on that branch. The workflows among them are the gate,
-# and the job names of the newest such run of each are the roster - the names
-# GitHub itself rendered the last time each workflow reported in full, with
-# every matrix leg already expanded. A successful run is required rather than
-# merely a completed one because a run cancelled before its jobs were created
-# carries no names at all, and an empty roster is the one answer that could turn
-# every green rollup into a pass. The file header owns why the gate is push runs
-# on the target branch and what that choice costs.
+# The gate is the workflows that do BOTH: validate <branch> on a push, observed
+# from the repository's successful push runs there, and declare a trigger a pull
+# request can fire, read from the `on:` block of each candidate's own workflow
+# file at <branch>. A candidate a pull request cannot produce is dropped rather
+# than demanded, and a candidate whose file or triggers cannot be read is a
+# refusal. Candidates are keyed by workflow identity, so a workflow renamed
+# since its older runs is one candidate under its current name rather than two.
 #
-# Two overrides name a standard outright instead, for the cases observation
+# The roster is the job names of the newest successful push run of each gating
+# workflow - the names GitHub itself rendered the last time each reported in
+# full, with every matrix leg already expanded. A successful run is required
+# rather than merely a completed one because a run cancelled before its jobs
+# were created carries no names at all, and an empty roster is the one answer
+# that could turn every green rollup into a pass. The file header owns why the
+# gate is push runs on the target branch, why the trigger test reads the file
+# when the roster must not, and what each choice costs.
+#
+# Two overrides name a standard outright instead, for the cases this resolution
 # cannot serve. FM_CI_REQUIRED_SUITES is a JSON array of job names, for a change
 # that deliberately adds or removes a CI job, whose branch is therefore judged
 # against a roster the target branch has not recorded yet.
 # FM_CI_GATING_WORKFLOWS is a JSON array of workflow names, for a repository
-# whose gate the push-run rule gets wrong. Set on its own it still takes the
+# whose gate this resolution still gets wrong - a workflow whose pull_request
+# trigger is filtered away from this branch, or one the branch validates under a
+# trigger the grammar above will not read. It replaces the whole gate, the
+# trigger test included, so it is the way to demand a workflow this resolution
+# drops as well as to drop one it keeps. Set on its own it still takes the
 # roster from those workflows' observed runs, so a named workflow the branch has
 # never validated is refused rather than quietly contributing no suites at all.
 #
@@ -336,10 +529,11 @@ FM_CI_ROSTER_SOURCE=''
 fm_ci_roster() {
   local repo=$1 branch=${2:-}
   local gate_override='' roster_override='' runs gate observed missing
-  local names names_source roster roster_source
-  local name run_id run_jobs total jobs
+  local names names_source roster roster_source excluded owned
+  local name path wstate run_id file run_jobs total jobs rc
   FM_CI_WORKFLOWS=''
   FM_CI_WORKFLOWS_SOURCE=''
+  FM_CI_WORKFLOWS_EXCLUDED=''
   FM_CI_ROSTER=''
   FM_CI_ROSTER_SOURCE=''
 
@@ -378,20 +572,59 @@ fm_ci_roster() {
     }
   fi
 
-  # One query answers both halves. Run ids increase over time, so the largest id
-  # carrying a given workflow name is that workflow's newest successful run on
-  # the branch, without depending on the order the reply happens to arrive in.
+  # What the repository owns NOW, which is what says whether a workflow_id in
+  # the run history still exists and what that workflow is called today. A list
+  # that cannot name every workflow can only understate the gate, so more than
+  # one page of them is refused rather than read from the first.
+  owned=$(fm_ci_gh api "repos/$repo/actions/workflows?per_page=100" 2>/dev/null) || owned=''
+  total=$(printf '%s' "$owned" | jq -r '.total_count // empty' 2>/dev/null) || total=''
+  case "$total" in
+    ''|*[!0-9]*)
+      printf 'error: could not read the workflows %s owns\n' "$repo" >&2
+      return 1
+      ;;
+  esac
+  [ "$total" -le 100 ] || {
+    printf 'error: %s owns %s workflows, more than one page can name\n' "$repo" "$total" >&2
+    return 1
+  }
+  owned=$(printf '%s' "$owned" | jq -c '
+    [.workflows[]? | {id: .id, name: ((.name // "") | tostring),
+                      path: ((.path // "") | tostring), state: ((.state // "") | tostring)}
+     | select((.id | type) == "number")]' 2>/dev/null) || owned=''
+  [ -n "$owned" ] || {
+    printf 'error: could not read the workflows %s owns\n' "$repo" >&2
+    return 1
+  }
+
+  # One query answers the candidates and the roster both. Run ids increase over
+  # time, so the largest id under a workflow_id is that workflow's newest
+  # successful run on the branch, without depending on the order the reply
+  # happens to arrive in.
   runs=$(fm_ci_gh api \
     "repos/$repo/actions/runs?branch=$branch&status=success&event=push&per_page=100" \
     2>/dev/null) || runs=''
-  observed=$(printf '%s' "$runs" | jq -c '
-    [.workflow_runs[]? | {name: ((.name // "") | tostring), id: .id}
-     | select(.name != "" and (.id | type) == "number")]
-    | group_by(.name) | map({name: .[0].name, run: (map(.id) | max)})
-    | sort_by(.name)' 2>/dev/null) || observed=''
+  # Grouped by workflow identity, then named from what the repository owns
+  # today: a run carries the name the workflow had when it ran, so a rename
+  # would otherwise split one workflow into two candidates. A workflow_id the
+  # repository no longer lists has been deleted, which is recorded here as the
+  # state "removed" and dropped below with the rest of what cannot run.
+  # Piped rather than passed as an argument: a hundred full run objects is more
+  # than an argument list holds, and jq would refuse to start.
+  observed=$(printf '%s' "$runs" | jq -c --argjson owned "$owned" '
+    [.workflow_runs[]? | {wid: .workflow_id, id: .id, name: ((.name // "") | tostring)}
+     | select((.wid | type) == "number" and (.id | type) == "number")]
+    | group_by(.wid)
+    | map((max_by(.id)) as $newest
+          | ([$owned[] | select(.id == $newest.wid)] | first) as $w
+          | {name: ($w.name // $newest.name), path: ($w.path // ""),
+             state: ($w.state // "removed"), run: $newest.id})
+    | map(select(.name != "")) | sort_by(.name)' 2>/dev/null) || observed=''
   [ -n "$observed" ] || observed='[]'
 
   if [ -n "$gate_override" ]; then
+    # The gate named outright replaces the trigger test as well as the
+    # observation, so an operator can demand a workflow this resolution drops.
     names=$gate_override
     names_source="the FM_CI_GATING_WORKFLOWS override"
     gate=$(jq -cn --argjson observed "$observed" --argjson want "$gate_override" '
@@ -403,13 +636,66 @@ fm_ci_roster() {
         "$repo" "$branch" >&2
       return 1
     fi
-    names=$(printf '%s' "$observed" | jq -c '[.[].name] | unique' 2>/dev/null) || names=''
+    gate='[]'
+    excluded=''
+    while IFS='	' read -r name wstate path run_id; do
+      [ -n "$name" ] || continue
+      if [ "$wstate" != active ]; then
+        # Deleted from the repository, or disabled in it. Either way no pull
+        # request can produce it, which is the same finding as a push-only
+        # trigger reached one step earlier.
+        excluded="${excluded:+$excluded; }$name (no longer runs in $repo)"
+        continue
+      fi
+      [ -n "$path" ] || {
+        printf 'error: %s in %s names no workflow file to read its triggers from\n' \
+          "$name" "$repo" >&2
+        return 1
+      }
+      file=$(fm_ci_gh api "repos/$repo/contents/$path?ref=$branch" 2>/dev/null \
+        | jq -r 'if type == "object" and (.content | type) == "string"
+                 then (.content | gsub("\\s"; "") | @base64d) else empty end' 2>/dev/null) \
+        || file=''
+      [ -n "$file" ] || {
+        printf 'error: could not read %s at %s in %s to see whether a pull request can trigger %s\n' \
+          "$path" "$branch" "$repo" "$name" >&2
+        return 1
+      }
+      rc=0
+      printf '%s\n' "$file" | fm_ci_workflow_pr_triggered || rc=$?
+      case "$rc" in
+        0)
+          gate=$(jq -cn --argjson g "$gate" --arg n "$name" --argjson r "$run_id" \
+            '$g + [{name: $n, run: $r}]' 2>/dev/null) || gate=''
+          [ -n "$gate" ] || {
+            printf 'error: could not assemble the gating workflows of %s on %s\n' "$repo" "$branch" >&2
+            return 1
+          }
+          ;;
+        1) excluded="${excluded:+$excluded; }$name (declares no pull_request trigger)" ;;
+        *)
+          printf 'error: could not read the triggers %s declares in %s of %s\n' \
+            "$name" "$path" "$repo" >&2
+          return 1
+          ;;
+      esac
+    done <<EOF
+$(printf '%s' "$observed" | jq -r '.[] | [.name, .state, .path, (.run | tostring)] | @tsv' 2>/dev/null)
+EOF
+
+    if [ "$gate" = '[]' ]; then
+      printf 'error: no workflow %s runs on a push to %s can be triggered by a pull request%s\n' \
+        "$repo" "$branch" "${excluded:+, so none of them gates one: $excluded}" >&2
+      return 1
+    fi
+    names=$(printf '%s' "$gate" | jq -c '[.[].name] | unique' 2>/dev/null) || names=''
     [ -n "$names" ] || {
       printf 'error: could not read the workflows %s runs on a push to %s\n' "$repo" "$branch" >&2
       return 1
     }
-    names_source="$repo successful push runs on $branch"
-    gate=$observed
+    names_source="$repo successful push runs on $branch that a pull request can trigger"
+    # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+    FM_CI_WORKFLOWS_EXCLUDED=$excluded
   fi
 
   if [ -n "$roster_override" ]; then

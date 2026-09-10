@@ -1,16 +1,17 @@
 # Gating workflow resolution verification
 
 Empirical record for how `bin/fm-ci-checks-lib.sh` decides which workflows are a repository's pull request gate, and for the three outcomes `bin/fm-pr-ci-verify.sh` must keep apart while doing it.
-Every command below was run on 2026-09-02 against the live GitHub API, and every output is reproduced exactly.
+The resolution queries and the two-outcome transcripts under "The push-only deploy" were run on 2026-09-10; the transcripts under "The three outcomes, live" were run on 2026-09-02.
+Every output is reproduced exactly.
 
-The guarantee this record supports: the gate follows the repository under test, so a repository whose gating workflow is not named `CI` is answered rather than refused, and a green verdict is still granted only on evidence.
-The portable regression in `tests/fm-ci-checks.test.sh` pins the classifier and the resolution logic against a stubbed forge; only a live run can show that the query this resolution is built on returns what the resolution assumes.
+The guarantee this record supports: the gate follows the repository under test, so a repository whose gating workflow is not named `CI` is answered rather than refused, a workflow no pull request can trigger is not demanded of one, and a green verdict is still granted only on evidence.
+The portable regression in `tests/fm-ci-checks.test.sh` pins the classifier and the resolution logic against a stubbed forge; only a live run can show that the queries this resolution is built on return what the resolution assumes.
 
 ## Versions
 
 ```
 $ gh --version | head -1
-gh version 2.95.0 (2026-06-17)
+gh version 2.100.0 (2026-09-03)
 
 $ jq --version
 jq-1.8.2
@@ -19,9 +20,11 @@ $ bash --version | head -1
 GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)
 ```
 
-## What the resolution query returns
+The 2026-09-02 transcripts below were taken under gh 2.95.0 (2026-06-17) with the same jq and bash.
 
-The gate and the roster are both read from one query: the repository's successful push runs on the target branch.
+## What the candidate query returns
+
+The candidates and the roster are both read from one query: the repository's successful push runs on the target branch.
 `x45dev/agent-standards` is the case that motivated this - it owns two workflows, `lint` and `tag-release`, and only the first is a gate.
 
 ```
@@ -45,10 +48,134 @@ $ gh api 'repos/x45dev/firstmate/actions/runs?branch=main&status=success&event=p
 ```
 
 `Require no-mistakes` is deliberately absent: it runs only on `pull_request`, and a fork validating a commit on its own branch push can never produce such a run, so requiring one would refuse the head-repository evidence the verifier exists to accept.
+A candidate that survives this query is then asked whether a pull request can trigger it at all, which the next section records.
 
-## The defect this closed
+## The push-only deploy
 
-Before the change, on the same repository and pull request:
+A successful push run proves a workflow validates the target branch, not that a pull request can produce it.
+`x45dev/www.startrails.net` is the shape that separates the two: its `Deploy` runs on a push to `main` and on `workflow_dispatch`, and its `CI` also runs on `pull_request`.
+
+```
+$ gh api 'repos/x45dev/www.startrails.net/actions/runs?branch=main&status=success&event=push&per_page=100' --jq '[.workflow_runs[] | {name, path, workflow_id}] | group_by(.name) | map({name:.[0].name, path:.[0].path, workflow_id:.[0].workflow_id, n:length})'
+[{"n":25,"name":"CI","path":".github/workflows/ci.yml","workflow_id":326562050},{"n":12,"name":"Deploy","path":".github/workflows/deploy.yml","workflow_id":328585471},{"n":1,"name":"Deploy to Cloud Run","path":".github/workflows/deploy.yml","workflow_id":328585471}]
+```
+
+Two facts the resolution depends on are visible there.
+A run carries the `path` and `workflow_id` of the workflow that produced it, and `Deploy to Cloud Run` is not a retired workflow but the same `workflow_id` under the name it had when that run happened, so keying candidates on the run's name invents a second gating workflow out of a rename.
+The repository's current workflow list is what says which of those names still exists and what the workflow is called now:
+
+```
+$ gh api 'repos/x45dev/www.startrails.net/actions/workflows?per_page=100' --jq '.workflows[] | [.id,.name,.path,.state] | @tsv'
+331547049	Assert contact live	.github/workflows/assert-contact-live.yml	active
+326562050	CI	.github/workflows/ci.yml	active
+328585471	Deploy	.github/workflows/deploy.yml	active
+326563125	Dependency Graph	dynamic/dependabot/update-graph	active
+```
+
+The trigger set is read from each candidate's own file at the target branch:
+
+```
+$ . bin/fm-ci-checks-lib.sh
+$ gh api 'repos/x45dev/www.startrails.net/contents/.github/workflows/ci.yml?ref=main' | jq -r '.content | gsub("\\s";"") | @base64d' | fm_ci_workflow_events
+push
+pull_request
+
+$ gh api 'repos/x45dev/www.startrails.net/contents/.github/workflows/deploy.yml?ref=main' | jq -r '.content | gsub("\\s";"") | @base64d' | fm_ci_workflow_events
+push
+workflow_dispatch
+```
+
+### The trigger grammar under other awks
+
+The grammar is one awk program, so it is only as portable as the awk that runs it.
+It uses `[[:blank:]]` rather than `[ \t]` and `index(line, "\t")` rather than a `\t` regex for that reason.
+Checked on 2026-09-10 against every awk on hand, on the same four inputs each time - a block `on:`, an inline comment, the YAML 1.1 `true:` spelling, and a flow mapping that must be refused:
+
+```
+$ . bin/fm-ci-checks-lib.sh
+$ for A in "gawk --posix" mawk "busybox awk"; do
+>   printf 'name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\n' | $A "$FM_CI_WORKFLOW_ON_AWK"
+>   printf 'on: {push: null}\n' | $A "$FM_CI_WORKFLOW_ON_AWK" 2>/dev/null; echo "refused rc=$?"
+> done
+push
+pull_request
+refused rc=1
+push
+pull_request
+refused rc=1
+push
+pull_request
+refused rc=1
+```
+
+`tests/fm-ci-checks.test.sh` pins the grammar itself on whichever awk CI provides.
+
+### The defect the trigger test closed
+
+Before the trigger test, on `x45dev/www.startrails.net` pull request 30, which is merged:
+
+```
+$ bin/fm-pr-ci-verify.sh https://github.com/x45dev/www.startrails.net/pull/30
+https://github.com/x45dev/www.startrails.net/pull/30
+gating workflows: CI, Deploy, Deploy to Cloud Run, from x45dev/www.startrails.net successful push runs on main
+required suites: 6, from x45dev/www.startrails.net CI run 34432844118, Deploy run 31416123061, Deploy to Cloud Run run 31100329470 on main
+  suite SUCCESS	CI / lint
+  suite SUCCESS	CI / test
+  suite SUCCESS	CI / e2e
+x45dev/www.startrails.net checks: incomplete (3 repository-owned)
+missing required suites:
+  deploy-backend
+  deploy-edge
+  deploy-frontend
+error: refusing to call https://github.com/x45dev/www.startrails.net/pull/30 green: x45dev/www.startrails.net checks do not cover the required suite roster.
+$ echo $?
+1
+```
+
+The three named suites are unreachable rather than not-yet-run, and `deploy-frontend` had already been deleted from `deploy.yml` - it survived only in the pre-rename run the old name dragged in.
+The same refusal was reproduced on `x45dev/www.x45.dev` pull request 27, `x45dev/www.ioflow.org` pull request 19 and `x45dev/www.ehlands.com` pull request 25, all merged.
+
+### After
+
+```
+$ bin/fm-pr-ci-verify.sh https://github.com/x45dev/www.startrails.net/pull/30
+https://github.com/x45dev/www.startrails.net/pull/30
+gating workflows: CI, from x45dev/www.startrails.net successful push runs on main that a pull request can trigger
+not gating: Deploy (declares no pull_request trigger)
+required suites: 3, from x45dev/www.startrails.net CI run 34432844118 on main
+  suite SUCCESS	CI / lint
+  suite SUCCESS	CI / test
+  suite SUCCESS	CI / e2e
+x45dev/www.startrails.net checks: passing (3 repository-owned)
+validated: x45dev/www.startrails.net suites passed on c6258143848a45647998d07efb09a594db8da75f in x45dev/www.startrails.net
+$ echo $?
+0
+```
+
+`Deploy to Cloud Run` is gone from both halves without a rule of its own: grouping the runs by `workflow_id` collapses it onto `Deploy`, which the trigger test then drops.
+The other three landing sites verify identically, each on `CI / lint`, `CI / test` and `CI / e2e` alone.
+
+A repository that never had this problem is unchanged by it, which is the other half of the check.
+`x45dev/firstmate` pull request 12, merged, before and after:
+
+```
+$ bin/fm-pr-ci-verify.sh https://github.com/x45dev/firstmate/pull/12
+https://github.com/x45dev/firstmate/pull/12
+gating workflows: CI, from x45dev/firstmate successful push runs on main that a pull request can trigger
+required suites: 12, from x45dev/firstmate CI run 33701412177 on main
+x45dev/firstmate checks: passing (25 repository-owned)
+validated: x45dev/firstmate suites passed on 602033a5046ea75e38c2418ee4210c3e2daa2877 in x45dev/firstmate
+$ echo $?
+0
+```
+
+Only the provenance phrase changed; the gate, the roster and the verdict are the same as before the change.
+The suite lines are elided from that transcript.
+`Require no-mistakes` stays out of the gate for the reason it always did - it runs only on `pull_request`, so it produces no push run to be observed as a candidate - and the trigger test never sees it.
+
+## The defect the per-repository gate closed
+
+Before the gate followed the repository, on `x45dev/agent-standards` pull request 110:
 
 ```
 $ bin/fm-pr-ci-verify.sh https://github.com/x45dev/agent-standards/pull/110
@@ -126,5 +253,7 @@ $ echo $?
 ## Refreshing this record
 
 Re-run the transcripts above.
-The pull requests named here are merged and their check history is immutable, so their outputs are stable; the resolution queries are not, because they read whatever has run on the branch since.
+The pull requests named here are merged and their check history is immutable, so their outputs are stable; the resolution queries are not, because they read whatever has run on the branch since, and the workflow list and file reads follow whatever the repository owns now.
 A resolution query whose reply no longer matches the shape recorded here is a finding about the resolution, not about this record.
+A verdict transcript can also move for a reason that is not a defect: the roster is read from the target branch as it is today, so a repository that has since added a gating workflow will refuse an older pull request that predates it.
+That is what `x45dev/agent-standards` pull request 110 does now, identically before and after this change, because a `test` workflow was added to that repository after it merged.

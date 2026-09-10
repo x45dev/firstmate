@@ -59,7 +59,15 @@ if [ "${1:-}" = api ]; then
   case "${2:-}" in
     */jobs*)
       printf '%s\n' '{"total_count":12,"jobs":[{"name":"Lint"},{"name":"Test coverage guard"},{"name":"Behavior portable parallel 1"},{"name":"Behavior portable parallel 2"},{"name":"Behavior portable serial 1"},{"name":"Behavior portable serial 2"},{"name":"Behavior portable serial 3"},{"name":"Behavior portable serial 4"},{"name":"Behavior tests (Herdr)"},{"name":"Behavior timing aggregate"},{"name":"Stock macOS Bash snapshot compatibility"},{"name":"Repo invariants"}]}' ;;
-    */actions/runs*)             printf '{"workflow_runs":[{"id":5150,"name":"CI"}]}\n' ;;
+    # What the repository owns now, which is what names the candidate a run in
+    # the history belongs to, and the candidate's own file, which is where its
+    # declared triggers are read from. A workflow no pull request can trigger
+    # does not gate one, so the fixture declares a pull_request trigger.
+    */actions/workflows*)
+      printf '%s\n' '{"total_count":1,"workflows":[{"id":101,"name":"CI","path":".github/workflows/ci.yml","state":"active"}]}' ;;
+    */contents/*)
+      printf 'name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\n' | jq -Rs '{content: @base64}' ;;
+    */actions/runs*)             printf '{"workflow_runs":[{"id":5150,"name":"CI","workflow_id":101}]}\n' ;;
     *)                           printf '{"default_branch":"main"}\n' ;;
   esac
   exit 0

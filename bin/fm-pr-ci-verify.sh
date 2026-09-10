@@ -35,11 +35,27 @@
 # repository whose gating workflow is not called "CI" is answered rather than
 # discarded.
 #
+# The gate is what a PULL REQUEST can be held to, so it carries only workflows a
+# pull request can actually produce: a workflow the repository runs on a push to
+# the target branch is a candidate, and it joins the gate when its own file
+# declares a pull_request or pull_request_target trigger. A deploy triggered by
+# a push and by workflow_dispatch alone is dropped rather than demanded, because
+# demanding it names suites that are unreachable rather than not-yet-run, and a
+# refusal a reader cannot act on is a refusal that teaches them to route around
+# this command. Every dropped candidate is printed with its reason, so the
+# verdict shows what was set aside as well as what was required.
+#
 # Usage: fm-pr-ci-verify.sh <pr-url>
-# Env:   FM_CI_GATING_WORKFLOWS  JSON array of workflow names to treat as the
-#          repository's gate instead of the ones read from its own successful
-#          push runs on the target branch. The escape hatch for a repository
-#          that rule gets wrong.
+# Env:   FM_CI_GATING_WORKFLOWS  JSON array of workflow names to be the
+#          repository's gate outright. It replaces both halves of the
+#          resolution - the push-run observation and the pull_request trigger
+#          test - so it is how to demand a workflow the resolution drops as well
+#          as how to drop one it keeps. The cases it is for are a workflow whose
+#          pull_request trigger is filtered away from this branch by branches:
+#          or paths: (which the trigger test deliberately does not evaluate),
+#          and one whose `on:` block is written in a shape that test will not
+#          read. It is not the fix for a push-only deploy being demanded; that
+#          is the resolution's own job and it does it.
 #        FM_CI_REQUIRED_SUITES  JSON array of job names to require instead of
 #          the roster read from the target repository. The escape hatch for a
 #          change that deliberately adds or removes a CI job, whose branch is
@@ -120,6 +136,10 @@ state=$(fm_ci_checks_state "$rollup" "$ROSTER" "$WORKFLOWS") || unreadable "the 
 printf '%s\n' "$URL"
 printf 'gating workflows: %s, from %s\n' \
   "$(printf '%s' "$WORKFLOWS" | jq -r 'join(", ")')" "$FM_CI_WORKFLOWS_SOURCE"
+# What was considered and set aside, so a reader can tell a gate that weighed
+# the repository's deploy from one that never saw it.
+[ -z "$FM_CI_WORKFLOWS_EXCLUDED" ] \
+  || printf 'not gating: %s\n' "$FM_CI_WORKFLOWS_EXCLUDED"
 printf 'required suites: %s, from %s\n' \
   "$(printf '%s' "$ROSTER" | jq -r 'length')" "$FM_CI_ROSTER_SOURCE"
 roster=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" \
