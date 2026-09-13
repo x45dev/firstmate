@@ -120,6 +120,9 @@ SH
   cat > "$home/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case " $* " in
+  *" api "*"/repos/"*) printf 'true\n'; exit 0 ;;
+esac
 case "${1:-} ${2:-}" in
   "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
 esac

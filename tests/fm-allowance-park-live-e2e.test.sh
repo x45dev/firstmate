@@ -32,18 +32,15 @@
 # pins the classifier logic everywhere else.
 set -u
 
-if [ "${FM_ALLOWANCE_PARK_DRIFT:-0}" != 1 ]; then
-  echo "skip: set FM_ALLOWANCE_PARK_DRIFT=1 to run the installed-harness allowance-park drift guard"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fm_live_gate opt-in FM_ALLOWANCE_PARK_DRIFT tmux
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-allowance-drift-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-allowance-drift.XXXXXX")
