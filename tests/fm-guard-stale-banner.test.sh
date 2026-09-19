@@ -477,10 +477,8 @@ test_autoarm_long_turn_requires_every_healthy_signal() {
         ;;
     esac
     out=$(run_guard_case_autoarm "$dir")
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
-    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
-    [ -z "$replacement_pid" ] || kill "$replacement_pid" 2>/dev/null || true
-    [ -z "$replacement_pid" ] || wait "$replacement_pid" 2>/dev/null || true
+    fm_test_stop "$pid" watcher
+    fm_test_stop "$replacement_pid" "replacement watcher"
     replacement_pid=
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "auto-arm long-turn health must not survive $case_name; guard output: $out"
@@ -651,8 +649,7 @@ test_extension_held_unhealthy_locks_stay_alarm() {
     esac
     touch "$home/state/.last-watcher-beat"
     out=$(run_guard_case_extension "$dir")
-    [ -z "$holder_pid" ] || kill "$holder_pid" 2>/dev/null || true
-    [ -z "$holder_pid" ] || wait "$holder_pid" 2>/dev/null || true
+    fm_test_stop "$holder_pid" "lock holder"
     fm_test_stop "$session_pid"
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "an extension-owned held lock with $case_name must alarm: $out"

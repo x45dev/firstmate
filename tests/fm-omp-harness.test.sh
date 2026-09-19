@@ -415,8 +415,7 @@ test_ownership_proof_is_omp_keyed() {
   owns "$root" "$home" && fail "a session missing the turn-end guard extension must not own supervision"
   root="$TMP_ROOT/own-dead/root"; home="$TMP_ROOT/own-dead/home"
   record_omp_session "$root" "$home" "$pid" || fail "could not record the dead session"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid" "omp fixture"
   owns "$root" "$home" && fail "a dead session must not own supervision"
 
   # The pull-guard verdict tolerates the extension's own hand-off only with the proof.
@@ -435,8 +434,7 @@ test_ownership_proof_is_omp_keyed() {
     . "$1"; fm_watcher_supervision_verdict "$2" "$3" 999 "$4" "$5"; printf "%s %s" "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$root/bin/fm-watch.sh" "$home" "$root")
   [ "$verdict" = "false no-watcher" ] || fail "without the proof the same hand-off must alarm as no-watcher, got '$verdict'"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid" "omp fixture"
   pass "fm-wake-lib: the omp ownership proof is keyed on its own extensions and gates the hand-off tolerance"
 }
 

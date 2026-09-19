@@ -570,8 +570,7 @@ assert_present "$QUARANTINE_STARTED" "the quarantine fixture did not begin execu
 GROUP_PID=$(cat "$JOB_DIR/.claim/group")
 printf 'invalid\n' > "$JOB_DIR/.claim/group"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
-kill -TERM "$WORKER_PID"
-wait "$WORKER_PID" 2>/dev/null || true
+fm_test_stop "$WORKER_PID" worker
 for _ in $(seq 1 100); do
   [ -f "$STATE_ROOT/worker.lock/quarantine" ] && break
   sleep 0.05
@@ -640,8 +639,7 @@ assert_present "$RECOVERY_STATE/worker.ready" "a reused supervisor pid did not p
 assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retained stale quarantine"
 kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
   || fail "worker recovery signalled a process whose supervisor identity did not match"
-kill -TERM "$RECOVERY_WORKER_PID"
-wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
+fm_test_stop "$RECOVERY_WORKER_PID" "recovery worker"
 RECOVERY_WORKER_PID=
 fm_test_stop "$QUARANTINED_PROCESS_PID"
 pass "quarantine recovery refuses unverifiable supervisors and ignores reused pids"
@@ -709,8 +707,7 @@ for _ in $(seq 1 600); do
 done
 assert_present "$REPEAT_STATE/worker.ready" \
   "the worker after a repeatedly signalled shutdown never reported ready"
-kill -TERM "$REPEAT_WORKER_PID"
-wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+fm_test_stop "$REPEAT_WORKER_PID" "repeat worker"
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
 

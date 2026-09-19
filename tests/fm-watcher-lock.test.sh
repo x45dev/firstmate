@@ -61,9 +61,8 @@ test_singleton_start() {
     i=$((i + 1))
   done
   grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
-  kill "$pid1" "$pid2" 2>/dev/null || true
-  wait "$pid1" 2>/dev/null || true
-  wait "$pid2" 2>/dev/null || true
+  fm_test_stop "$pid1" "first watcher"
+  fm_test_stop "$pid2" "second watcher"
   pass "simultaneous watcher starts leave exactly one live process"
 }
 
@@ -173,7 +172,7 @@ test_watcher_signal_releases_held_locks() {
 
   kill -TERM "$pid" 2>/dev/null || fail "could not signal the parked watcher"
   : > "$release"
-  wait_for_exit "$pid" 300
+  fm_test_stop "$pid" "parked watcher"
   wait "$holder" 2>/dev/null || true
 
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
@@ -1149,7 +1148,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   fi
 
   kill -CONT "$watcher_pid" 2>/dev/null || true
-  kill -TERM "$watcher_pid" 2>/dev/null || true
+  fm_test_stop "$watcher_pid" "stopped watcher"
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "terminated stopped-watcher cycle did not surface nonzero (status $status)"

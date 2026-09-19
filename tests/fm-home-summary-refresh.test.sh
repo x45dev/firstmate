@@ -304,8 +304,7 @@ while ! jq -e 'any(.queued[]; .id == "cadence-task")' \
   sleep 0.1
   i=$((i + 1))
 done
-kill "$WATCH_PID" >/dev/null 2>&1 || true
-wait "$WATCH_PID" >/dev/null 2>&1 || true
+fm_test_stop "$WATCH_PID" watcher
 WATCH_PID=
 pass "live watcher cadence bounds publication staleness without signals"
 
@@ -477,8 +476,7 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "repeated lock timeout changed the best-effort caller result"
 [ "$(grep -c 'refresh exceeded its 1-second deadline' "$HOME_DIR/state/.home-summary-refresh.log" 2>/dev/null || true)" -ge 2 ] \
   || fail "repeated publication lock timeouts vanished from failure reporting"
-kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
-wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+fm_test_stop "$LOCK_HOLDER_PID" "lock holder"
 LOCK_HOLDER_PID=
 pass "best-effort refresh bounds publication lock acquisition"
 
@@ -794,11 +792,9 @@ while [ "$seen" -lt 3 ] && [ "$i" -lt 200 ]; do
 done
 [ "$seen" -ge 3 ] \
   || fail "the beacon advanced only $seen time(s) in 20 seconds while publication was stalled"
-kill "$WATCH_PID" >/dev/null 2>&1 || true
-wait "$WATCH_PID" >/dev/null 2>&1 || true
+fm_test_stop "$WATCH_PID" watcher
 WATCH_PID=
-kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
-wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+fm_test_stop "$LOCK_HOLDER_PID" "lock holder"
 LOCK_HOLDER_PID=
 pass "a stalled publication does not delay the watcher liveness beacon"
 
@@ -910,8 +906,7 @@ while [ ! -e "$RESTART_HOME/state/home-summary.json" ] && [ "$i" -lt 200 ]; do
 done
 [ -e "$RESTART_HOME/state/home-summary.json" ] \
   || fail "a dead publication lock wedged publication"
-kill "$WATCH_PID" >/dev/null 2>&1 || true
-wait "$WATCH_PID" >/dev/null 2>&1 || true
+fm_test_stop "$WATCH_PID" watcher
 WATCH_PID=
 pass "publication remains single-flight across watcher restart"
 
@@ -1040,8 +1035,7 @@ PATH="$ORDER_DATE_BIN:$FAKEBIN:$PATH" FM_TEST_REAL_DATE="$REAL_DATE" \
   FM_HOME="$ORDER_HOME" FM_HOME_SUMMARY_TIMEOUT=2 \
   "$WRITER" --best-effort \
   || fail "ordered timeout changed the best-effort caller result"
-kill "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
-wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+fm_test_stop "$LOCK_HOLDER_PID" "lock holder"
 LOCK_HOLDER_PID=
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ORDER_HOME" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \

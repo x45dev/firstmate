@@ -384,7 +384,8 @@ test_marker_publish_failure_retains_recovery_evidence() {
   is_live_non_zombie "$first_arm" || fail "marker-failure fixture watcher did not stay live"
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   mkdir "$state/.watcher-down"
-  kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop marker-failure fixture watcher"
+  kill -0 "$watcher_pid" 2>/dev/null || fail "could not stop marker-failure fixture watcher"
+  fm_test_stop "$watcher_pid" "marker-failure fixture watcher"
   wait_for_exit "$first_arm" 150 || [ "$?" -ne 124 ] \
     || fail "marker-failure fixture arm did not exit within 15s of its watcher being stopped"
 
@@ -794,7 +795,8 @@ test_downtime_marker_does_not_follow_symlink() {
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   printf 'must remain intact\n' > "$sentinel"
   ln -s "$sentinel" "$state/.watcher-down"
-  kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop symlink fixture watcher"
+  kill -0 "$watcher_pid" 2>/dev/null || fail "could not stop symlink fixture watcher"
+  fm_test_stop "$watcher_pid" "symlink fixture watcher"
   wait_for_exit "$ARM_PID" 150 || [ "$?" -ne 124 ] \
     || fail "symlink fixture arm did not exit within 15s of its watcher being stopped"
 

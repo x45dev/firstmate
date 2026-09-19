@@ -1457,9 +1457,10 @@ test_interruption_before_and_after_raw_commit() {
   [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
   set +e
-  wait "$pid"
+  wait_for_exit "$pid" 150
   rc=$?
   set -e
+  [ "$rc" -ne 124 ] || fail "drain did not exit within 15s of TERM before raw commitment"
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
@@ -1478,8 +1479,10 @@ test_interruption_before_and_after_raw_commit() {
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
   set +e
-  wait "$pid"
+  wait_for_exit "$pid" 150
+  rc=$?
   set -e
+  [ "$rc" -ne 124 ] || fail "drain did not exit within 15s of TERM after raw presentation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" 2> "$dir/after-replay.err" \
     || fail "drain after post-presentation interruption failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$empty_out")

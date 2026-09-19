@@ -393,8 +393,8 @@ omp|{"stop_hook_active":false}
 Grok|{"sessionId":"grok-session","stopHookActive":false}
 Kimi|{"stop_hook_active":false}
 EOF
-  kill "$holder" "$pid" 2>/dev/null || true
-  wait "$holder" "$pid" 2>/dev/null || true
+  fm_test_stop "$holder" "episode holder"
+  fm_test_stop "$pid" "guard fixture"
   pass "fm-turnend-guard: healthy non-Claude harness paths ignore Claude episode contention"
 }
 

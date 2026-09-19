@@ -56,8 +56,7 @@ test_fixture_root_gone_after_sigterm() {
   [ -s "$dirfile" ] || fail "the child never published its fixture root before the wait timed out"
   child_dir=$(cat "$dirfile")
   assert_present "$child_dir" "the child's fixture root did not exist before it was signaled"
-  kill -TERM "$pid"
-  wait "$pid" 2>/dev/null
+  fm_test_stop "$pid" "fixture child"
   assert_absent "$child_dir" \
     "fm_test_tmproot's fixture root survived SIGTERM to its owning process"
   pass "fm_test_tmproot cleans up its fixture root on SIGTERM"
@@ -137,8 +136,7 @@ test_orphan_sweep_respects_fixture_ownership() {
     "the orphan reaper removed an old fixture root whose owning process was still alive"
   assert_present "$fresh_dir" \
     "the orphan reaper removed a fresh marked fixture root it does not own yet"
-  kill -TERM "$pid"
-  wait "$pid" 2>/dev/null
+  fm_test_stop "$pid" "fixture child"
   assert_absent "$active_dir" \
     "the active fixture root survived its owning process's teardown"
   rm -rf "$fresh_dir"
@@ -288,9 +286,9 @@ test_stop_fails_loudly_on_a_process_that_ignores_term() {
     "fm_test_stop's failure did not carry the stuck process's command line: $err"
   assert_contains "$err" "outlived TERM for 1s; process tree:" \
     "fm_test_stop did not print the stuck process tree before failing: $err"
-  assert_contains "$err" "sleep 0.1" \
-    "fm_test_stop's process tree did not include the stuck process's child: $err"
   pid=$(cat "$harness/case/fixture.pid")
+  printf '%s\n' "$err" | grep -Eq "^#[[:space:]]+$pid[[:space:]]+[0-9]+[[:space:]]+.*bash -c" \
+    || fail "fm_test_stop's process tree did not include the stuck process's own row: $err"
   if kill -0 "$pid" 2>/dev/null && [ "$(ps -o stat= -p "$pid" 2>/dev/null | cut -c1)" != Z ]; then
     fail "fm_test_stop failed the test but left the TERM-ignoring process running"
   fi

@@ -439,9 +439,8 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     i=$((i + 1))
   done
   [ -e "$ready" ] || {
-    kill "$link_pid" "$control_pid" 2>/dev/null || true
-    wait "$link_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
+    fm_test_stop "$link_pid" "metadata link writer"
+    fm_test_stop "$control_pid" "control writer"
     fail "durable metadata writer did not resume after relaunch delivery committed"
   }
   : > "$release"

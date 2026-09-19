@@ -407,9 +407,8 @@ test_viewer_stop_requires_the_recorded_parent() {
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "parent-mismatch stop failed"
   kill -0 "$launcher_pid" 2>/dev/null || fail "stop signalled a launcher without its recorded child"
   kill -0 "$viewer_pid" 2>/dev/null || fail "stop signalled a viewer outside the recorded launcher"
-  kill "$launcher_pid" "$viewer_pid" 2>/dev/null || true
-  wait "$launcher_pid" 2>/dev/null || true
-  wait "$viewer_pid" 2>/dev/null || true
+  fm_test_stop "$launcher_pid" launcher
+  fm_test_stop "$viewer_pid" viewer
   run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-parent fixture teardown failed"
   pass "fm-herdr-lab: viewer ownership requires the recorded parent"
 }
@@ -436,7 +435,8 @@ SH
   done
   launcher_pid=$(cat "$started")
   kill -TERM "$command_pid"
-  wait "$command_pid" || status=$?
+  wait_for_exit "$command_pid" 150 || status=$?
+  [ "$status" -ne 124 ] || fail "interrupted viewer start did not exit within 15s of TERM"
   rm -f "$FAKEBIN/python3"
   [ "$status" -ne 0 ] || fail "interrupted viewer start unexpectedly succeeded"
   "$REAL_SLEEP" 0.6

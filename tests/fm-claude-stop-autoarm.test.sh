@@ -623,9 +623,8 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   assert_present "$dir/state/.turnend-claude-blocks" "contended reset deleted the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "contended reset deleted the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "contended reset deleted the attended alarm"
-  kill "$holder" "$watcher" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-  wait "$watcher" 2>/dev/null || true
+  fm_test_stop "$holder" "lock holder"
+  fm_test_stop "$watcher" watcher
   rm -rf "$dir/state/.claude-autoarm.lock"
   pass "auto-arm: owner-mutex contention preserves successor episode state"
 }
