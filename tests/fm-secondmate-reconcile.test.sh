@@ -967,8 +967,7 @@ test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
     i=$((i + 1))
     sleep 0.05
   done
-  kill "$watcher" 2>/dev/null || true
-  wait "$watcher" 2>/dev/null || true
+  fm_test_stop "$watcher"
   [ -n "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
     || fail "supervision did not deliver the durable reconcile request later: $(cat "$home/watch.err")"
   [ -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \

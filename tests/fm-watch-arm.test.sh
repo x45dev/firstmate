@@ -232,8 +232,7 @@ test_attached_arm_still_fails_on_a_wake_it_did_not_deliver() {
   # observed watcher remains uninvolved, so only watcher-bound evidence can
   # distinguish this from a delivered watcher cycle.
   append_wake "$state" check process-event "check: process-event result captured: fixture"
-  kill "$SEED_PID" 2>/dev/null || true
-  wait "$SEED_PID" 2>/dev/null || true
+  fm_test_stop "$SEED_PID"
   wait_for_exit "$ARM_PID" 120
   status=$?
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
@@ -328,8 +327,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
 
   # A later down interval can have no new queue rows at all. The unchanged
   # remote decision must still trigger a recovery wake and be folded again.
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
+  fm_test_stop "$ARM_PID"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/decision-only-arm.out"
   wait_for_exit "$ARM_PID" 80 || fail "decision-only re-arm did not surface the open decision"
   decision_recovery_arm=$ARM_PID
@@ -369,8 +367,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
     || fail "completed decision handling could not acknowledge current recovery"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/decision-successor-arm.out"
   is_live_non_zombie "$ARM_PID" || fail "acknowledged decision recovery did not leave a live successor"
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
+  fm_test_stop "$ARM_PID"
   pass "watch-arm: re-arm surfaces every queued wake and an open remote decision after downtime"
 }
 
@@ -438,8 +435,7 @@ test_delivery_gap_wake_is_recovered_once() {
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/stable-successor.out"
   is_live_non_zombie "$ARM_PID" || fail "successor looped after the delivery gap was drained"
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
+  fm_test_stop "$ARM_PID"
   pass "watch-arm: a wake queued after handling drain is recovered once at successor arm"
 }
 
@@ -557,8 +553,7 @@ test_malformed_marker_is_quarantined_once() {
   ack_wakes "$state" || fail "malformed-marker handling acknowledgement failed"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/stable-successor.out"
   is_live_non_zombie "$ARM_PID" || fail "malformed marker caused a persistent recovery loop"
-  kill "$ARM_PID" 2>/dev/null || true
-  wait "$ARM_PID" 2>/dev/null || true
+  fm_test_stop "$ARM_PID"
   pass "watch-arm: malformed recovery state is quarantined without a successor loop"
 }
 
@@ -612,8 +607,7 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "restart cleared reused-pid lock evidence without a recovery wake: $(cat "$armout")"
   is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
-  kill "$unrelated" 2>/dev/null || true
-  wait "$unrelated" 2>/dev/null || true
+  fm_test_stop "$unrelated"
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
 }
 

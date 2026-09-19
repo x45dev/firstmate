@@ -1832,8 +1832,7 @@ printf '%s\n%s\nreused-token\nnot-the-live-process-identity\n' \
 chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim"
 pe "$HI" retire reused-src >/dev/null
 kill -0 "$innocent_pid" 2>/dev/null || fail "retirement signaled a PID whose identity did not match the claim"
-kill "$innocent_pid" 2>/dev/null || true
-wait "$innocent_pid" 2>/dev/null || true
+fm_test_stop "$innocent_pid"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim" "retirement releases the exact reused-pid claim"
 pass "detected PID reuse is refused before signalling"
 

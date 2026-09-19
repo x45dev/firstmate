@@ -784,8 +784,7 @@ EOF
 
   status=0
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
@@ -870,8 +869,7 @@ EOF
   holder_pid=$!
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
   out=$(FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
   assert_contains "$out" "READ-ONLY SESSION" "trace-context refusal fixture did not enter read-only mode"
   [ "$(cat "$home/state/.trace-context-effective")" = "$frozen" ] \
     || fail "a lock-refused session must not mutate the frozen trace-context state"
@@ -2245,8 +2243,7 @@ EOF
 
   out=$(FM_FAKE_HARNESS=pi FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
     run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_contains "$out" "READ-ONLY SESSION" "competing live lock owner did not force read-only mode"
   assert_contains "$out" "READ_ONLY_AGENTS=current" \
@@ -2353,8 +2350,7 @@ EOF
   readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_contains "$readonly_out" "READ-ONLY SESSION" \
     "--reemit assumed lock ownership instead of re-verifying it"
@@ -2493,8 +2489,7 @@ EOF
   touch -t 203001010000 "$marker" 2>/dev/null || touch "$marker"
 
   out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a stale loaded marker"
 
@@ -2518,8 +2513,7 @@ EOF
   write_pi_loaded_markers "$home" "$root" "$holder_pid"
 
   out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_not_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic rejected a current pre-lock loaded marker"
 
@@ -2563,8 +2557,7 @@ EOF
   write_omp_loaded_markers "$home" "$root" "$holder_pid"
 
   out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_contains "$out" "primary harness: omp" "omp holder ancestry was not detected as omp"
   assert_not_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp diagnostic rejected a current pre-lock loaded marker"
@@ -2588,8 +2581,7 @@ EOF
   write_pi_watch_loaded_marker "$home" "$root" "$holder_pid"
 
   out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a session without the turn-end guard extension"
 
@@ -2615,8 +2607,7 @@ EOF
   write_pi_turnend_loaded_marker "$home" "$root" "$holder_pid"
 
   out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a marker from a previous Pi process"
 

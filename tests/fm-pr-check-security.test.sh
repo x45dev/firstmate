@@ -2470,8 +2470,7 @@ test_teardown_cannot_race_authority_consumption() {
     sleep 0.01
     i=$((i + 1))
     if [ "$i" -ge 500 ]; then
-      kill "$watcher_pid" 2>/dev/null || true
-      wait "$watcher_pid" 2>/dev/null || true
+      fm_test_stop "$watcher_pid"
       fail "teardown race: watcher did not begin its validated poll"
     fi
   done

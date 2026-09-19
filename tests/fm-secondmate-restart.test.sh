@@ -700,8 +700,7 @@ test_unpublished_worker_result_is_accounted_for() {
     i=$((i + 1))
   done
   if kill -0 "$driver" 2>/dev/null; then
-    kill "$driver" 2>/dev/null || true
-    wait "$driver" 2>/dev/null || true
+    fm_test_stop "$driver"
     fail "a terminated restart worker left the parent hung"
   fi
   wait "$driver" 2>/dev/null || true

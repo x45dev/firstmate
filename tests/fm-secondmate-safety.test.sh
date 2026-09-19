@@ -2437,8 +2437,7 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     i=$((i + 1))
   done
   [ -e "$lock" ] || {
-    kill "$holder" 2>/dev/null || true
-    wait "$holder" 2>/dev/null || true
+    fm_test_stop "$holder"
     return 1
   }
   printf '%s %s\n' "$holder" "$lock"
@@ -2598,8 +2597,7 @@ EOF
   [ -e "$lock" ] || fail "forced teardown removed the publisher's task-set lock"
   grep -F 'task-set lock is held' "$err" >/dev/null \
     || fail "the refusal did not name the task-set contention: $(cat "$err")"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   pass "forced teardown refuses while a fresh task is being published in the home"
 }
 
@@ -2627,8 +2625,7 @@ EOF
     || fail "the spawn refusal did not name the task-set contention: $(cat "$err")"
   [ ! -e "$subhome/state/.spawn-newtask.lock" ] \
     || fail "a refused spawn left its own task lock behind"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   pass "a fresh spawn refuses to publish while a forced teardown owns the task set"
 }
 
@@ -2655,8 +2652,7 @@ test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
     || fail "the remote spawn refusal did not name task-set contention: $(cat "$err")"
   [ ! -e "$home/state/.spawn-remote-new.lock" ] \
     || fail "a refused remote secondmate spawn left its own task lock behind"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   pass "a fresh remote secondmate spawn refuses while the task set is owned"
 }
 
@@ -2826,8 +2822,7 @@ EOF
     grep -F "stale: $window" "$out" >/dev/null && fail "idle secondmate pane triggered stale wake"
     fail "watcher exited unexpectedly while supervising idle secondmate"
   fi
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   grep -F "stale: $window" "$out" >/dev/null && fail "idle secondmate pane triggered stale wake"
   pass "idle kind=secondmate pane is healthy and not stale"
 }

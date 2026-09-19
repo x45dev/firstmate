@@ -306,8 +306,7 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid" "a process that outlived its wait_for_exit limit"
   return 124
 }
 

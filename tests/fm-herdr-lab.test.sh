@@ -386,8 +386,7 @@ test_viewer_stop_only_signals_owned_processes() {
   printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop rejected a stale process record"
   kill -0 "$holder_pid" 2>/dev/null || fail "stop signalled a PID whose recorded identity did not match"
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop failed once the client had detached"
   assert_absent "$record" "a confirmed detach left the viewer record behind"

@@ -303,8 +303,7 @@ NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 [ "$NEW_WORKER_PID" != "$OTHER_PID" ] || fail "the replacement adopted an unrelated persisted pid"
 fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   || fail "stale ownership recovery did not start the current worker"
-kill "$OTHER_PID" 2>/dev/null || true
-wait "$OTHER_PID" 2>/dev/null || true
+fm_test_stop "$OTHER_PID"
 OTHER_PID=
 pass "stale ownership is reclaimed without signaling a reused pid"
 
@@ -644,8 +643,7 @@ kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
 kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
-kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
-wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+fm_test_stop "$QUARANTINED_PROCESS_PID"
 pass "quarantine recovery refuses unverifiable supervisors and ignores reused pids"
 
 # A replacement stops a Linux worker by signalling its whole isolated group, and
