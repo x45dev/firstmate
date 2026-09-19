@@ -1,0 +1,10 @@
+ok - fm_test_tmproot cleans up its fixture root on normal exit
+ok - fm_test_tmproot cleans up its fixture root on SIGTERM
+ok - the cleanup registry cannot be injected through path precreation
+ok - failed fixture registration rolls back the new root
+ok - the orphan sweep reaps only old fixtures without a live owner
+ok - the orphan sweep reaps read-only package fixtures
+not ok - wait_for_exit did not report its limit for a process that had to be stopped:  (missing: 'rc=124')
+--- output ---
+
+exit=1

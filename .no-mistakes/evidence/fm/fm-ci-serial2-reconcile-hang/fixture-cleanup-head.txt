@@ -1,0 +1,10 @@
+ok - fm_test_tmproot cleans up its fixture root on normal exit
+ok - fm_test_tmproot cleans up its fixture root on SIGTERM
+ok - the cleanup registry cannot be injected through path precreation
+ok - failed fixture registration rolls back the new root
+ok - the orphan sweep reaps only old fixtures without a live owner
+ok - the orphan sweep reaps read-only package fixtures
+ok - wait_for_exit stops a process that lost its first TERM instead of waiting on it forever
+ok - fm_test_stop stops and reaps a process that lost its first TERM
+ok - fm_test_stop kills a process that ignores TERM at its bound and fails naming it
+ok - fm_test_stop repeats the signal it was told to send, not TERM

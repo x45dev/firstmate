@@ -1,0 +1,3 @@
+ok - fm_test_tmproot cleans up its fixture root on normal exit
+tests/fm-test-fixture-cleanup.test.sh: line 59: fm_test_stop: command not found
+not ok - fm_test_tmproot's fixture root survived SIGTERM to its owning process
