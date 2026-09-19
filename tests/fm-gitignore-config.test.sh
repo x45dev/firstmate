@@ -84,8 +84,39 @@ test_scratchpad2_does_not_dirty_porcelain() {
   pass "scratchpad2/ does not make git status --porcelain dirty"
 }
 
+test_wrangler_dir_ignored_by_tracked_rules() {
+  # Wrangler writes an account-identifying cache under .wrangler/. Judge the
+  # tracked .gitignore alone in a fresh repository, because this checkout's
+  # shared info/exclude may already name .wrangler/ and would pass regardless.
+  # Only placeholder bytes are written; no real cache content is ever read.
+  local repo sample status staged
+  repo=$(mktemp -d "${TMPDIR:-/tmp}/fm-wrangler-ignore.XXXXXX")
+  git init -q "$repo"
+  cp "$ROOT/.gitignore" "$repo/.gitignore"
+  for sample in .wrangler/cache/wrangler-account.json .wrangler/state/v3/d1/db.sqlite; do
+    if ! git -C "$repo" check-ignore -q --no-index "$sample"; then
+      rm -rf "$repo"
+      fail "tracked .gitignore does not ignore $sample"
+    fi
+  done
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed gitignore'
+  mkdir -p "$repo/.wrangler/cache"
+  printf 'placeholder\n' > "$repo/.wrangler/cache/wrangler-account.json"
+  status=$(git -C "$repo" status --porcelain --untracked-files=all)
+  git -C "$repo" add -A
+  staged=$(git -C "$repo" diff --cached --name-only)
+  rm -rf "$repo"
+  [ -z "$status" ] || fail ".wrangler/ still dirties git status --porcelain: $status"
+  [ -z "$staged" ] || fail "git add -A staged a .wrangler/ path: $staged"
+  pass ".wrangler/ is ignored by the tracked .gitignore alone"
+}
+
+
 test_config_dir_ignored_as_category
 test_unrelated_path_stays_visible
 test_scratchpad_prefix_is_ignored
 test_scratchpad_prefix_ignores_no_tracked_path
 test_scratchpad2_does_not_dirty_porcelain
+test_wrangler_dir_ignored_by_tracked_rules
