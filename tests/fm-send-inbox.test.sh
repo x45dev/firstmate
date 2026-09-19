@@ -22,6 +22,9 @@
 #      retryable send failure that could duplicate the durable instruction.
 #   9. An unwritable inbox is a real local failure: nonzero exit, nothing
 #      typed, and a just-created pending-reply expectation is discarded.
+#  10. An unsupported leading option is refused, not delivered as the body:
+#      nonzero exit naming the flag, no inbox record, nothing typed, and no
+#      pending-reply expectation; a -- terminator still sends dash-led text.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -338,6 +341,42 @@ test_unwritable_inbox_fails_loudly() {
   pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
 }
 
+test_unsupported_option_is_refused() {
+  local dir err rc target flag
+  for target in t1 fm-domain; do
+    for flag in --note-file --resolve-keys -f; do
+      dir=$(setup_case "unsupported-$target$flag"); err="$dir/send.err"
+      fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+      run_send "$dir" "$err" -- "$target" "$flag" /tmp/instructions.md; rc=$?
+      [ "$rc" -ne 0 ] || fail "an unsupported option '$flag' to $target was delivered with exit 0"
+      assert_contains "$(cat "$err")" "unsupported option '$flag'" \
+        "the refusal should name the offending option"
+      assert_contains "$(cat "$err")" "--resolve-key, --fire-and-forget, and --key" \
+        "the refusal should name the supported options"
+      [ -z "$(find "$dir/home/state" -path '*.inbox/*' -type f 2>/dev/null)" ] \
+        || fail "a refused option '$flag' still wrote an inbox record for $target"
+      [ ! -s "$dir/send.log" ] || fail "a refused option still typed something:"$'\n'"$(cat "$dir/send.log")"
+      [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
+        || fail "a refused option '$flag' left a pending-reply expectation for $target"
+    done
+  done
+  pass "fm-send inbox: an unsupported leading option is refused and records nothing"
+}
+
+test_double_dash_sends_dash_led_text() {
+  local dir err rc body
+  dir=$(setup_case double-dash); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 -- --note-file "is the flag to use"; rc=$?
+  expect_code 0 "$rc" "a -- terminated dash-led message should be sent"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "--note-file is the flag to use" ] || fail "the -- terminated body differs: $body"
+  run_send "$dir" "$err" -- t1 -- --key Enter; rc=$?
+  expect_code 0 "$rc" "a -- terminated '--key' message should be sent as text"
+  body=$(record_body _ "$dir/home/state/t1.inbox/002.msg")
+  [ "$body" = "--key Enter" ] || fail "text after -- must not be read as the --key path: $body"
+  pass "fm-send inbox: -- ends option parsing so dash-led text is still delivered"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -350,3 +389,5 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_unsupported_option_is_refused
+test_double_dash_sends_dash_led_text

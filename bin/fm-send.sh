@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--] <text...>
+#   Any other leading argument starting with "-" is refused, not sent as text;
+#   put -- before a message that itself begins with a dash.
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -449,9 +451,14 @@ fi
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
-# message exactly as before, so ordinary sends are byte-identical.
+# message exactly as before, so ordinary sends are byte-identical. Any other
+# leading dash argument is refused rather than delivered as the message: a
+# mistyped or unsupported flag would otherwise become a well-formed record
+# holding only the flag while the send exits 0. A literal -- ends option
+# parsing, so a message that genuinely starts with a dash is still sendable.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
+FM_SEND_END_OF_OPTIONS=0
 fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
@@ -489,6 +496,16 @@ while :; do
       [ -z "$FIRE_AND_FORGET_ID" ] || { echo "error: duplicate --fire-and-forget" >&2; exit 1; }
       FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
       shift
+      ;;
+    --)
+      FM_SEND_END_OF_OPTIONS=1
+      shift
+      break
+      ;;
+    --key) break ;;
+    -*)
+      echo "error: unsupported option '$1'; fm-send accepts only --resolve-key, --fire-and-forget, and --key before the message (put -- before a message that itself starts with a dash); nothing was sent" >&2
+      exit 1
       ;;
     *) break ;;
   esac
@@ -583,7 +600,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
     exit 1
   fi
-  if [ "${1:-}" = "--key" ]; then
+  if [ "$FM_SEND_END_OF_OPTIONS" = 0 ] && [ "${1:-}" = "--key" ]; then
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
     exit 1
   fi
@@ -692,7 +709,7 @@ fm_send_feed_resolved_holds() {  # <answer-text>
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
-if [ "${1:-}" = "--key" ]; then
+if [ "$FM_SEND_END_OF_OPTIONS" = 0 ] && [ "${1:-}" = "--key" ]; then
   [ -z "$FIRE_AND_FORGET_ID" ] \
     || { echo "error: --fire-and-forget cannot accompany --key" >&2; exit 1; }
   case "$*" in
