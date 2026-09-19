@@ -168,8 +168,8 @@ export FM_TEST_STUB_MAX_BLOCK_SECONDS
 # Stop a background process a test started and reap it, within a bound. The
 # signal defaults to TERM; a test that exercises another handler, such as HUP,
 # names it. One TERM followed by a bare `wait` is not a stop: a bash script
-# that traps TERM can lose that signal outright. GNU bash 5.2 runs a trap that lands while it
-# is parsing a command substitution in the half-built parser state, the trap
+# that traps TERM can lose that signal outright. GNU bash 5.2 runs a trap that
+# lands while it is parsing a command substitution in the half-built parser state, the trap
 # action fails with "unexpected EOF while looking for matching `)'", and the
 # script carries on as if never signaled. A watcher polls through hundreds of
 # command substitutions a second, so roughly one TERM in a few hundred is lost,
