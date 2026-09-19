@@ -1,0 +1,68 @@
+##### BASE (before): unsupported flag
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the requested message WILL still be sent.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+exit=0
+inbox: 001.msg handled 
+typed: 1 lines
+--- 001.msg:
+schema=fm-task-inbox.v1
+at=2026-09-19T12:03:52Z
+--
+--note-file /tmp/instructions.md##### TARGET (after): unsupported flag
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+error: unsupported option '--note-file'; fm-send accepts only --resolve-key, --fire-and-forget, and --key before the message (put -- before a message that itself starts with a dash); nothing was sent
+exit=1
+inbox: 
+typed: 0 lines
+##### TARGET: -f short flag
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+error: unsupported option '-f'; fm-send accepts only --resolve-key, --fire-and-forget, and --key before the message (put -- before a message that itself starts with a dash); nothing was sent
+exit=1
+inbox: 
+typed: 0 lines
+##### TARGET: unsupported flag after valid --resolve-key
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+error: unsupported option '--bogus'; fm-send accepts only --resolve-key, --fire-and-forget, and --key before the message (put -- before a message that itself starts with a dash); nothing was sent
+exit=1
+inbox: 
+typed: 0 lines
+##### TARGET: unsupported flag after --fire-and-forget
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+error: unsupported option '--bogus'; fm-send accepts only --resolve-key, --fire-and-forget, and --key before the message (put -- before a message that itself starts with a dash); nothing was sent
+exit=1
+inbox: 
+typed: 0 lines
+##### TARGET: plain send still works
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+exit=0
+inbox: 001.msg handled 
+typed: 1 lines
+##### TARGET: -- then dash-led text
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+exit=0
+inbox: 001.msg 002.msg handled 
+typed: 1 lines
+##### TARGET: dash inside message (not leading) still fine
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+exit=0
+inbox: 001.msg 002.msg 003.msg handled 
+typed: 1 lines
+##### final inbox
+--- 001.msg:
+schema=fm-task-inbox.v1
+at=2026-09-19T12:03:54Z
+--
+please rebase onto main--- 002.msg:
+schema=fm-task-inbox.v1
+at=2026-09-19T12:03:55Z
+--
+--note-file is the flag--- 003.msg:
+schema=fm-task-inbox.v1
+at=2026-09-19T12:03:55Z
+--
+fix this -x
