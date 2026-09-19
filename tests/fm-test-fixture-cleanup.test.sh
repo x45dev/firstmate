@@ -185,6 +185,13 @@ STOP_FIXTURE_IGNORES_TERM='trap "" TERM
 printf "%s\n" "$$" > "$1"
 while :; do sleep 0.1; done'
 
+# shellcheck disable=SC2016 # Expanded by the fixture or case bash that runs it.
+STOP_FIXTURE_SWALLOWS_FIRST_HUP_IGNORES_TERM='n=0
+trap "" TERM
+trap '\''n=$((n + 1)); [ "$n" -lt 2 ] || exit 129'\'' HUP
+printf "%s\n" "$$" > "$1"
+while :; do sleep 0.1; done'
+
 # The body every case runs: start <fixture> in the background, wait for it to
 # arm its trap, then run <stop-command> against its pid and report the outcome.
 # shellcheck disable=SC2016 # Expanded by the fixture or case bash that runs it.
@@ -290,6 +297,23 @@ test_stop_fails_loudly_on_a_process_that_ignores_term() {
   pass "fm_test_stop kills a process that ignores TERM at its bound and fails naming it"
 }
 
+test_stop_repeats_the_named_signal() {
+  local harness
+  harness=$(fm_test_tmproot fm-test-stop-named-signal)
+  # shellcheck disable=SC2016 # Expanded by the fixture or case bash that runs it.
+  run_stop_case "$harness/case" "$LIB" "$STOP_FIXTURE_SWALLOWS_FIRST_HUP_IGNORES_TERM" \
+    'fm_test_stop "$pid" "the HUP fixture" HUP'
+  [ "$STOP_CASE_RC" -ne 124 ] \
+    || fail "fm_test_stop hung on a process that lost its first HUP"
+  [ "$STOP_CASE_RC" -eq 0 ] \
+    || fail "fm_test_stop failed a process that exits on its second HUP: $(cat "$harness/case/err")"
+  assert_contains "$(cat "$harness/case/out")" "fixture=gone" \
+    "fm_test_stop returned while the process that lost its first HUP was still running"
+  assert_not_contains "$(cat "$harness/case/err")" "not ok" \
+    "fm_test_stop reported a failure for a process that stopped within its bound"
+  pass "fm_test_stop repeats the signal it was told to send, not TERM"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
@@ -299,3 +323,4 @@ test_orphan_sweep_reaps_read_only_package_tree
 test_wait_for_exit_outlasts_a_lost_first_term
 test_stop_outlasts_a_lost_first_term
 test_stop_fails_loudly_on_a_process_that_ignores_term
+test_stop_repeats_the_named_signal
