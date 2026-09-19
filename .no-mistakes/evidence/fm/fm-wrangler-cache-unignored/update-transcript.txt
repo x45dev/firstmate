@@ -1,0 +1,21 @@
+##### BASE (67da4bf .gitignore)
+== git status --porcelain in checkout:
+?? .wrangler/
+== fm-update.sh:
+firstmate: skipped: dirty working tree
+reread-firstmate: no
+restart-secondmates: none
+nudge-secondmates: none
+== AGENTS.md in checkout now: v1
+== git add -A; staged:
+.wrangler/cache/wrangler-account.json
+
+##### TARGET (0f985bd .gitignore)
+== git status --porcelain in checkout:
+== fm-update.sh:
+firstmate: updated 8bc964d..03520aa (instructions changed: AGENTS.md)
+reread-firstmate: yes
+restart-secondmates: none
+nudge-secondmates: none
+== AGENTS.md in checkout now: v2
+== git add -A; staged:
