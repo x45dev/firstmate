@@ -782,8 +782,7 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$DEFAULT_RATE_COUNT" LAVISH_SCRI
   "$ROOT/bin/fm-procevent-lavish.sh" poll "$DEFAULT_RATE_ART" >/dev/null 2>&1 &
 DEFAULT_RATE_PID=$!
 perl -MTime::HiRes=sleep -e 'sleep 6.2'
-kill -TERM "$DEFAULT_RATE_PID" 2>/dev/null || true
-wait "$DEFAULT_RATE_PID" 2>/dev/null || true
+fm_test_stop "$DEFAULT_RATE_PID" "default-rate source"
 default_rate_count=$(cat "$DEFAULT_RATE_COUNT" 2>/dev/null || echo 0)
 [ "$default_rate_count" -ge 2 ] \
   || fail "the default poll governor stopped an instantly returning source from making progress"
@@ -1832,8 +1831,7 @@ printf '%s\n%s\nreused-token\nnot-the-live-process-identity\n' \
 chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim"
 pe "$HI" retire reused-src >/dev/null
 kill -0 "$innocent_pid" 2>/dev/null || fail "retirement signaled a PID whose identity did not match the claim"
-kill "$innocent_pid" 2>/dev/null || true
-wait "$innocent_pid" 2>/dev/null || true
+fm_test_stop "$innocent_pid"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/reused-src.claim" "retirement releases the exact reused-pid claim"
 pass "detected PID reuse is refused before signalling"
 
@@ -2767,8 +2765,7 @@ DETACHED_START_PID=$!
 wait_for "$HDETACHED/state/procevent/detached-attached-src.runner" \
   || fail "the detachable foreground start never launched its source"
 DETACHED_RUNNER_PID=$(cat "$HDETACHED/state/procevent/detached-attached-src.runner")
-kill "$DETACHED_START_PID"
-wait "$DETACHED_START_PID" 2>/dev/null || true
+fm_test_stop "$DETACHED_START_PID" "detached start"
 detached_deadline=$((SECONDS + 8))
 while kill -0 "$DETACHED_RUNNER_PID" 2>/dev/null; do
   if [ "$SECONDS" -ge "$detached_deadline" ]; then

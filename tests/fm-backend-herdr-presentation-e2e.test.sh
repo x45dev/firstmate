@@ -7,6 +7,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
@@ -281,8 +283,7 @@ LOCK_CONTENTION_OWNER_PID=
 cleanup_all() {
   local wt
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
-    kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
-    wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
+    fm_test_stop "$LOCK_CONTENTION_OWNER_PID" "lock contention owner"
     LOCK_CONTENTION_OWNER_PID=
   fi
   while IFS= read -r wt; do
@@ -298,6 +299,7 @@ EOF
     LAB_READY=0
   fi
   rm -rf "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup_all EXIT
 

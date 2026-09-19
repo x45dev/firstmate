@@ -184,8 +184,7 @@ EOF
     "harvest did not print the finished result it acknowledged"
   [ -s "$home/state/.startup-network.delivered" ] \
     || fail "harvest did not durably acknowledge the result it printed"
-  kill "$claimant" 2>/dev/null || true
-  wait "$claimant" 2>/dev/null || true
+  fm_test_stop "$claimant"
   while kill -0 "$worker_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
     sleep 0.1
     waited=$((waited + 1))
@@ -232,8 +231,7 @@ EOF
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the crash-window worker never published"
   kill -0 "$claimant" 2>/dev/null \
     || fail "the claimant died before the worker published"
-  kill "$claimant" 2>/dev/null || true
-  wait "$claimant" 2>/dev/null || true
+  fm_test_stop "$claimant"
   wait_for_startup_network_wake "$home" || fail "the crash-window worker never settled delivery"
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
     "a claimant crash after publication silently lost the result"
@@ -271,8 +269,7 @@ EOF
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
     "the report-publication failure did not reach the wake queue"
 
-  kill "$claimant" 2>/dev/null || true
-  wait "$claimant" 2>/dev/null || true
+  fm_test_stop "$claimant"
   chmod 700 "$home/state/.startup-network.report"
   pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
 }
@@ -292,8 +289,7 @@ EOF
   FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
     run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the unclaimed successful worker never published"
-  kill "$claimant" 2>/dev/null || true
-  wait "$claimant" 2>/dev/null || true
+  fm_test_stop "$claimant"
 
   # Give the same settling window the crash-window test uses, then confirm no
   # wake ever lands - not a race that just hasn't finished yet.
@@ -334,8 +330,7 @@ EOF
     FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the unclaimed actionable worker never published"
-  kill "$claimant" 2>/dev/null || true
-  wait "$claimant" 2>/dev/null || true
+  fm_test_stop "$claimant"
 
   wait_for_startup_network_wake "$home" \
     || fail "an actionable successful (state=done) result never queued a wake"

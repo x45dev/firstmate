@@ -47,8 +47,7 @@ EOF
 pf_test_cleanup() {
   local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
   if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
-    kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
-    wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
+    fm_test_stop "$PF_TEST_LOCK_HOLDER"
     PF_TEST_LOCK_HOLDER=
   fi
   if [ -f "$pid_file" ]; then
@@ -2753,8 +2752,7 @@ test_remote_retire_refuses_unacquirable_lock_without_hanging() {
   rc=0
   EXPECT_OUT=$(run_pf_remote_timed 30 "$home" retire pf-remote-lock --reason "lock held" --force 2>&1) || rc=$?
   elapsed=$(( $(date +%s) - started ))
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   PF_TEST_LOCK_HOLDER=
   rm -rf "$lock"
 

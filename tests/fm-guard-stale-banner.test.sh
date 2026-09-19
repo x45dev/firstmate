@@ -221,8 +221,7 @@ test_healthy_recovery_rearms_next_stale_episode() {
   record_live_watcher "$dir" "$pid" || fail "could not record the live watcher for recovery"
   touch "$home/state/.last-watcher-beat"
   healthy=$(run_guard_case "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ -z "$healthy" ] || fail "guard should be silent after watcher recovery, got: $healthy"
   assert_absent "$home/state/.guard-watcher-stale-banner" \
     "healthy recovery must clear the stale-banner marker"
@@ -341,8 +340,7 @@ test_healthy_read_only_does_not_clear_marker() {
   record_live_watcher "$dir" "$pid" || fail "could not record the live watcher for read-only recovery"
   touch "$home/state/.last-watcher-beat"
   healthy=$(run_guard_case_read_only "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ -z "$healthy" ] || fail "healthy read-only guard should stay silent, got: $healthy"
   assert_present "$marker" "healthy read-only guard must not clear the stale-banner marker"
   after=$(cat "$marker")
@@ -425,8 +423,7 @@ test_autoarm_long_handling_turn_stays_silent() {
   record_aged_rewake_epoch "$home" "$pid"
   record_session_lock_pid "$home" "$pid"
   out=$(run_guard_case_autoarm "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ -z "$out" ] \
     || fail "a long auto-arm handling turn past grace must stay silent, got: $out"
   assert_absent "$home/state/.guard-watcher-stale-banner" \
@@ -461,8 +458,7 @@ test_autoarm_long_turn_requires_every_healthy_signal() {
         : > "$home/state/.claude-autoarm-failure-alarmed"
         ;;
       dead-lock)
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        fm_test_stop "$pid"
         pid=
         ;;
       missing-lock)
@@ -481,10 +477,8 @@ test_autoarm_long_turn_requires_every_healthy_signal() {
         ;;
     esac
     out=$(run_guard_case_autoarm "$dir")
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
-    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
-    [ -z "$replacement_pid" ] || kill "$replacement_pid" 2>/dev/null || true
-    [ -z "$replacement_pid" ] || wait "$replacement_pid" 2>/dev/null || true
+    fm_test_stop "$pid" watcher
+    fm_test_stop "$replacement_pid" "replacement watcher"
     replacement_pid=
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "auto-arm long-turn health must not survive $case_name; guard output: $out"
@@ -508,8 +502,7 @@ test_autoarm_open_claim_does_not_explain_stale_beacon() {
   printf 'epoch=3 owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
     "$pid" "$(date +%s)" "$identity" > "$home/state/.claude-autoarm-epoch"
   out=$(run_guard_case_autoarm "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "an open auto-arm claim must not suppress a stale-beacon alarm: $out"
   pass "fm-guard stale banner: an open auto-arm claim does not explain a stale beacon"
@@ -531,8 +524,7 @@ test_autoarm_long_turn_does_not_silence_other_models() {
     else
       out=$(run_guard_case "$dir")
     fi
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "a $model primary must still alarm on a stale beacon despite a leftover rewake epoch: $out"
   done
@@ -588,8 +580,7 @@ test_extension_handoff_with_live_session_is_healthy() {
   record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
   touch "$home/state/.last-watcher-beat"
   out=$(run_guard_case_extension "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ -z "$out" ] \
     || fail "an extension-owned hand-off with a live Pi session must stay silent, got: $out"
   assert_absent "$home/state/.guard-watcher-stale-banner" \
@@ -609,8 +600,7 @@ test_extension_handoff_with_empty_lock_is_healthy() {
   mkdir -p "$home/state/.watch.lock"
   touch "$home/state/.last-watcher-beat"
   out=$(run_guard_case_extension "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ -z "$out" ] \
     || fail "an extension-owned hand-off with an empty lock must stay silent, got: $out"
   assert_absent "$home/state/.guard-watcher-stale-banner" \
@@ -642,8 +632,7 @@ test_extension_held_unhealthy_locks_stay_alarm() {
           || fail "could not record the watcher lock for $case_name"
         case "$case_name" in
           dead-pid)
-            kill "$holder_pid" 2>/dev/null || true
-            wait "$holder_pid" 2>/dev/null || true
+            fm_test_stop "$holder_pid"
             holder_pid=
             ;;
           wrong-home)
@@ -660,10 +649,8 @@ test_extension_held_unhealthy_locks_stay_alarm() {
     esac
     touch "$home/state/.last-watcher-beat"
     out=$(run_guard_case_extension "$dir")
-    [ -z "$holder_pid" ] || kill "$holder_pid" 2>/dev/null || true
-    [ -z "$holder_pid" ] || wait "$holder_pid" 2>/dev/null || true
-    kill "$session_pid" 2>/dev/null || true
-    wait "$session_pid" 2>/dev/null || true
+    fm_test_stop "$holder_pid" "lock holder"
+    fm_test_stop "$session_pid"
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "an extension-owned held lock with $case_name must alarm: $out"
     assert_contains "$out" "no live watcher process holds this home lock" \
@@ -704,8 +691,7 @@ test_extension_ownership_needs_every_signal() {
     sleep 60 &
     pid=$!
     if [ "$(printf '%s' "$spec" | cut -d: -f2)" = dead ]; then
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      fm_test_stop "$pid"
     fi
     record_pi_extension_session "$dir" "$pid" \
       "$(printf '%s' "$spec" | cut -d: -f3)" \
@@ -713,8 +699,7 @@ test_extension_ownership_needs_every_signal() {
       || fail "could not record the Pi extension session for $case_name"
     touch "$home/state/.last-watcher-beat"
     out=$(run_guard_case_extension "$dir")
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "extension ownership must not survive $case_name; guard output: $out"
   done
@@ -736,8 +721,7 @@ test_extension_stale_beacon_alarms_despite_live_session() {
     FM_GUARD_GRACE=1 \
     FM_SUPERVISION_MODEL=extension \
     "$ROOT/bin/fm-guard.sh" 2>&1)
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "a beacon past grace must alarm even under a live Pi session: $out"
   assert_contains "$out" "no watcher has a fresh beacon" \
@@ -757,8 +741,7 @@ test_extension_handoff_keeps_queued_wake_warning() {
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "1700000000	1	signal	task	signal: crewmate needs a decision" > "$home/state/.wake-queue"
   out=$(run_guard_case_extension "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   assert_contains "$out" "queued wakes pending" \
     "the queued-wake warning must still fire during an extension-owned hand-off"
   assert_not_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
@@ -795,8 +778,7 @@ test_branch_actor_is_not_told_to_drain_queued_wakes() {
   assert_not_contains "$out" "queued wakes pending" \
     "a branch actor with no grant can drain nothing, so the warning must stay silent"
   out=$(run_guard_case_extension "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   assert_contains "$out" "queued wakes pending" \
     "main must still be warned about the queued rows"
   pass "fm-guard: the branch actor is never told to drain queued wakes while main still is"
@@ -811,8 +793,7 @@ test_persistent_model_ignores_pi_extension_evidence() {
   record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
   touch "$home/state/.last-watcher-beat"
   out=$(run_guard_case "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "a persistent-watcher primary must still alarm with Pi markers present: $out"
   assert_contains "$out" "no live watcher process holds this home lock" \
@@ -831,8 +812,7 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence() {
   record_live_watcher "$dir" "$pid" || fail "could not record the live watcher"
   touch "$home/state/.last-watcher-beat"
   out=$(run_guard_case_extension "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ -z "$out" ] \
     || fail "a live identity-matched watcher must be healthy under the extension model, got: $out"
   pass "fm-guard stale banner: extension model stays silent for a live watcher"
@@ -861,8 +841,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
       FM_HOME="$home" \
       FM_GUARD_GRACE=999 \
       "$ROOT/bin/fm-guard.sh" 2>&1)
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     [ -z "$out" ] \
       || fail "a $harness primary must route itself to the extension model, got: $out"
   done

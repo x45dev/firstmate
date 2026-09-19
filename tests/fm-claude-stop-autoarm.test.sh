@@ -299,8 +299,7 @@ test_inert_when_lock_held_by_other_harness() {
   printf '%s\n' "$other" > "$dir/state/.lock"
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
   owner_after=$(cat "$dir/state/.lock")
-  kill "$other" 2>/dev/null || true
-  wait "$other" 2>/dev/null || true
+  fm_test_stop "$other"
   expect_code 0 "$status" "hook must stay inert when another live harness holds the session lock"
   [ "$owner_after" = "$other" ] || fail "hook replaced another live harness owner: expected $other, got $owner_after"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while another session owned the lock"
@@ -439,8 +438,7 @@ test_actionable_close_with_live_successor_rewakes_once() {
   kill -0 "$pid" 2>/dev/null || fail "actionable delivery stopped or replaced the live successor"
   [ "$(epoch_outcome "$dir")" = clean ] || fail "the later benign close must record outcome=clean"
 
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   pass "auto-arm: actionable close survives a healthy successor without duplicate delivery"
 }
 
@@ -548,8 +546,7 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a failed-looking cycle with a live fresh watcher must be benign"
   expect_code 0 "$status2" "the next Stop-owned cycle must remain benign with the live watcher"
   [ -z "$out" ] || fail "benign live cycle produced an operator notice: $out"
@@ -584,11 +581,9 @@ test_positive_recovery_budget_contention_preserves_episode() {
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
   assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a later healthy auto-arm must complete the episode reset"
   assert_absent "$dir/state/.turnend-claude-blocks" "successful retry left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful retry left the failure notice"
@@ -628,9 +623,8 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   assert_present "$dir/state/.turnend-claude-blocks" "contended reset deleted the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "contended reset deleted the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "contended reset deleted the attended alarm"
-  kill "$holder" "$watcher" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
-  wait "$watcher" 2>/dev/null || true
+  fm_test_stop "$holder" "lock holder"
+  fm_test_stop "$watcher" watcher
   rm -rf "$dir/state/.claude-autoarm.lock"
   pass "auto-arm: owner-mutex contention preserves successor episode state"
 }
@@ -746,8 +740,7 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   record_autoarm_epoch "$dir" 464 "$pid" rewake
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   kill -0 "$pid" 2>/dev/null || fail "an identityless abandoned owner must be reclaimed without being signalled"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a claim whose ledger outcome is already terminal must be reclaimed, not deferred to forever"
   [ -e "$dir/state/arm-ran" ] || fail "abandoned claim left the home unarmed with work in flight"
   assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
@@ -772,8 +765,7 @@ test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
   record_autoarm_epoch "$dir" 464 "$pid" arming
   : > "$dir/state/.last-watcher-beat"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a legacy claim still arming under a fresh beacon must keep the single-flight gate closed"
   [ -z "$out" ] || fail "deferring to an arming claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "an arming claim was stolen and double-armed"
@@ -798,8 +790,7 @@ test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed() {
     > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a freshly arming legacy claim must keep the single-flight gate closed even after a long lapse"
   [ -z "$out" ] || fail "deferring to a fresh arming claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "a fresh arming claim was stolen and double-armed"
@@ -820,8 +811,7 @@ test_claim_not_named_by_the_ledger_is_never_reclaimed() {
   # what keeps that window from being mistaken for abandonment.
   record_autoarm_epoch "$dir" 464 999 rewake
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a live claim the ledger does not name is unproven and must be left alone"
   [ -z "$out" ] || fail "deferring to an unnamed claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "a claim the ledger does not name was stolen and double-armed"
@@ -850,8 +840,7 @@ test_pid_reused_arming_claim_is_reclaimed_and_rearms() {
   : > "$dir/state/.last-watcher-beat"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   kill -0 "$pid" 2>/dev/null || fail "the unrelated live process inheriting the number must never be signalled"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a claim whose recorded identity no longer matches its live pid must be reclaimed, arming entry or not"
   [ -e "$dir/state/arm-ran" ] || fail "a reused-pid claim left the home unarmed with work in flight"
   assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
@@ -875,8 +864,7 @@ test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms() {
   record_autoarm_owner_identity "$dir" "$$" || fail "could not record a claim pid-identity"
   assert_absent "$dir/state/.claude-autoarm-epoch" "this case must start with no ledger at all"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a reused-pid claim with no ledger to consult must still be reclaimed"
   [ -e "$dir/state/arm-ran" ] || fail "a reused-pid claim with no ledger left the home unarmed"
   assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
@@ -901,8 +889,7 @@ test_identity_matched_arming_claim_is_never_reclaimed() {
   record_autoarm_epoch "$dir" 464 "$pid" arming
   : > "$dir/state/.last-watcher-beat"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "an identity-matched claim still arming must keep the single-flight gate closed"
   [ -z "$out" ] || fail "deferring to an identity-matched arming claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "an identity-matched arming claim was stolen and double-armed"
@@ -923,8 +910,7 @@ test_terminal_check_claim_is_never_reclaimed() {
   record_autoarm_owner "$dir" "$pid" terminal-check
   record_autoarm_epoch "$dir" 464 "$pid" failed-suppressed
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "the guard's own terminal-check claim must never be reclaimed by the arm hook"
   [ -z "$out" ] || fail "deferring to a terminal-check claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "a terminal-check claim was stolen and double-armed"
@@ -1020,8 +1006,7 @@ test_open_generation_claim_defers_without_any_lock() {
   : > "$dir/state/.last-watcher-beat"
   assert_absent "$dir/state/.claude-autoarm.lock" "this case must start with no owner lock at all"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a live open generation claim must keep the single-flight gate closed with no lock held"
   [ -z "$out" ] || fail "deferring to an open generation claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "an open generation claim was superseded and double-armed"
@@ -1044,8 +1029,7 @@ test_stuck_generation_claim_is_superseded_and_rearms() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a live owner stuck arming past grace with a beacon just as stale must be superseded, not deferred to forever"
   [ -e "$dir/state/arm-ran" ] || fail "a stuck generation claim left the home unarmed with work in flight"
   assert_contains "$out" "firstmate watcher wake" "the superseding generation must still translate its wake"
@@ -1071,8 +1055,7 @@ test_identityless_ledger_never_defers() {
   : > "$dir/state/.last-watcher-beat"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   kill -0 "$pid" 2>/dev/null || fail "the unrelated live pid on an identityless ledger must never be signalled"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "an identityless arming ledger must be superseded, never deferred to"
   [ -e "$dir/state/arm-ran" ] || fail "an identityless ledger left the home unarmed"
   [ "$(epoch_field "$dir" epoch)" -gt 464 ] || fail "the identityless entry was not superseded: $(epoch_field "$dir" epoch)"
@@ -1279,8 +1262,7 @@ test_competing_session_never_publishes_a_claim() {
     [ "$n" -lt 500 ] || break
   done
   wait "$hook_pid" 2>/dev/null; status=$?
-  kill "$other" 2>/dev/null || true
-  wait "$other" 2>/dev/null || true
+  fm_test_stop "$other"
   [ "$claim_seen" -eq 0 ] || fail "a competing session's claim appeared before its identity gate could reject it"
   [ ! -e "$dir/state/.claude-autoarm-claim" ] || fail "a competing session left a claim behind: $(cat "$dir/hook.out" 2>/dev/null)"
   expect_code 0 "$status" "a competing session's firing must stay inert"

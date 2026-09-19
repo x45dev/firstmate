@@ -134,8 +134,7 @@ start_server() {
 
 stop_server() {
   [ -n "$SERVER_PID" ] || return 0
-  kill "$SERVER_PID" 2>/dev/null || true
-  wait "$SERVER_PID" 2>/dev/null || true
+  fm_test_stop "$SERVER_PID"
   SERVER_PID=
 }
 

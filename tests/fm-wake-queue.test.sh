@@ -1108,8 +1108,7 @@ test_main_reclaims_a_grant_whose_branch_owner_exited() {
     kill "$owner" 2>/dev/null || true
     fail "branch grant publication failed"
   }
-  kill "$owner" 2>/dev/null || true
-  wait "$owner" 2>/dev/null || true
+  fm_test_stop "$owner"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main reclaim drain failed"
   grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/main.out" \
@@ -1458,9 +1457,10 @@ test_interruption_before_and_after_raw_commit() {
   [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
   set +e
-  wait "$pid"
+  wait_for_exit "$pid" 150
   rc=$?
   set -e
+  [ "$rc" -ne 124 ] || fail "drain did not exit within 15s of TERM before raw commitment"
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
@@ -1479,8 +1479,10 @@ test_interruption_before_and_after_raw_commit() {
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
   set +e
-  wait "$pid"
+  wait_for_exit "$pid" 150
+  rc=$?
   set -e
+  [ "$rc" -ne 124 ] || fail "drain did not exit within 15s of TERM after raw presentation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" 2> "$dir/after-replay.err" \
     || fail "drain after post-presentation interruption failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$empty_out")
@@ -1746,8 +1748,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   grep "$(printf '\tsignal\t')" "$state/.wake-queue" >/dev/null \
     || { kill "$queue_holder" 2>/dev/null || true; fail "contended queue lock changed the durable wake"; }
 
-  kill "$queue_holder" 2>/dev/null || true
-  wait "$queue_holder" 2>/dev/null || true
+  fm_test_stop "$queue_holder"
 
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -1787,8 +1788,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     fail "contended presentation emitted status content without its cursor lock"
   fi
 
-  kill "$presentation_holder" 2>/dev/null || true
-  wait "$presentation_holder" 2>/dev/null || true
+  fm_test_stop "$presentation_holder"
   FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
     "$DRAIN" > "$second_out" 2> "$second_err" || fail "presentation retry failed"
   grep -F 'task.status: needs-decision [key=fixture]: presentation remains retriable' "$second_out" >/dev/null \
@@ -1821,8 +1821,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   [ "$rc" -eq 124 ] \
     || { kill "$ack_holder" 2>/dev/null || true; fail "held acknowledgement lock did not retain blocking semantics (rc=$rc)"; }
 
-  kill "$ack_holder" 2>/dev/null || true
-  wait "$ack_holder" 2>/dev/null || true
+  fm_test_stop "$ack_holder"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$replay_err" \
     || fail "drain after the interrupted acknowledgement failed"
   grep "$(printf '\tsignal\t')" "$replay_out" >/dev/null \

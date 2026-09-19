@@ -203,8 +203,7 @@ test_handling_successor_does_not_go_blind() {
     now=$((now + 1))
   done
   if ! grep -q '^signal:' "$out" 2>/dev/null; then
-    kill -TERM "$child" 2>/dev/null || true
-    wait "$child" 2>/dev/null || true
+    fm_test_stop "$child" "handling successor"
     fail "handling successor did not surface the crew event within the bounded startup-and-poll budget (waited $(( $(date +%s) - event_start ))s): $(cat "$out")"
   fi
   grep -F 'crew.status' "$out" >/dev/null \
@@ -217,8 +216,7 @@ test_handling_successor_does_not_go_blind() {
     printf 'T2_WATCH_OUTPUT=%s\n' "$(tr '\n' ' ' < "$out")"
     printf 'T2_QUEUE_ROW=%s\n' "$(grep "$(printf '\tsignal\tcrew.status\t')" "$state/.wake-queue" | tail -1)"
   fi
-  kill -TERM "$child" 2>/dev/null || true
-  wait "$child" 2>/dev/null || true
+  fm_test_stop "$child" "handling successor"
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 

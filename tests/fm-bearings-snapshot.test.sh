@@ -2958,8 +2958,7 @@ SH
     i=$((i + 1))
   done
   if [ ! -e "$home/cp-started" ]; then
-    kill "$snapshot_pid" 2>/dev/null || true
-    wait "$snapshot_pid" 2>/dev/null || true
+    fm_test_stop "$snapshot_pid"
     fail "snapshot never entered metadata capture"
   fi
   rm -f "$home/state/z-gone.meta"
@@ -3158,8 +3157,7 @@ SH
     i=$((i + 1))
   done
   if [ ! -e "$home/nm-started" ]; then
-    kill "$snapshot_pid" 2>/dev/null || true
-    wait "$snapshot_pid" 2>/dev/null || true
+    fm_test_stop "$snapshot_pid"
     fail "concurrent local snapshot never began a current-state read"
   fi
   wait "$snapshot_pid" || fail "concurrent local snapshot failed"

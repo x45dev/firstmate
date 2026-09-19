@@ -35,7 +35,7 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-allowance-park-tests)
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+reap() { fm_test_stop "$1" "${2:-watcher}"; }
 
 # The rendered notice exactly as the 2026-08-17 incident's panes carried it,
 # including the resume affordance that never reaches the transcript.

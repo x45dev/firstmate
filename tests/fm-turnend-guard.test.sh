@@ -339,15 +339,13 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "hook must exit 0 with a live identity-matched watcher lock and fresh beacon"
   [ -z "$out" ] || fail "hook produced output despite a live fresh watcher lock: $out"
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
@@ -361,8 +359,7 @@ test_hook_non_claude_health_ignores_claude_budget_contention() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify non-Claude contention watcher"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
@@ -396,8 +393,8 @@ omp|{"stop_hook_active":false}
 Grok|{"sessionId":"grok-session","stopHookActive":false}
 Kimi|{"stop_hook_active":false}
 EOF
-  kill "$holder" "$pid" 2>/dev/null || true
-  wait "$holder" "$pid" 2>/dev/null || true
+  fm_test_stop "$holder" "episode holder"
+  fm_test_stop "$pid" "guard fixture"
   pass "fm-turnend-guard: healthy non-Claude harness paths ignore Claude episode contention"
 }
 
@@ -408,15 +405,13 @@ test_hook_blocks_with_live_lock_and_stale_beacon() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "hook must block when a live watcher lock has an ancient beacon"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks on a live watcher lock with an ancient beacon"
@@ -569,8 +564,7 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
@@ -578,15 +572,13 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   out=$(run_hook "$dir" false); status=$?
   expect_code 0 "$status" "secondmate turn must end silently while its watcher is live (Stop #1)"
   [ -z "$out" ] || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "guard nagged a healthy secondmate at Stop #1: $out"
   }
   # The watcher exits on the wake (its normal lifecycle) and a SECOND child event
   # lands. On the re-invoked recovery turn the secondmate must re-arm; if it did
   # not, the guard blocks that turn's end and forces the re-arm (Stop #2).
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   rm -rf "$dir/state/.watch.lock"
   : > "$dir/state/child2.meta"
   touch "$dir/state/.last-watcher-beat"
@@ -1280,8 +1272,7 @@ test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
   out2=$(run_hook_claude "$dir" false); status2=$?
   count2=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "--claude mode must allow when the auto-arm owner process is alive"
   expect_code 0 "$status2" "--claude mode must keep allowing the same live auto-arm epoch"
   [ -z "$out" ] || fail "--claude owner-claimed allow produced output: $out"
@@ -1313,8 +1304,7 @@ test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open() 
     expect_code 0 "$status" "active arming epoch $i must own its Stop while advancing the failure budget"
     count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
     [ "$count" = "$i" ] || fail "arming epoch $i produced non-monotonic count $count"
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     rm -rf "$dir/state/.claude-autoarm.lock"
     epoch=$((epoch + 1))
     printf 'epoch=%s owner_pid=999 outcome=failed-suppressed updated_at=%s\n' "$epoch" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
@@ -1407,8 +1397,7 @@ test_hook_claude_mode_blocks_on_abandoned_autoarm_claim() {
   printf 'epoch=464 owner_pid=%s outcome=rewake updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "an owner lock left behind by a finished claim must not pass for recovery under way"
   assert_contains "$out" "TURN WOULD END BLIND" "abandoned-claim block must carry the blind-turn banner"
   assert_contains "$out" "2 task(s) in flight" "abandoned-claim block must name the unsupervised work"
@@ -1436,8 +1425,7 @@ test_hook_claude_mode_blocks_on_pid_reused_arming_claim() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   : > "$dir/state/.last-watcher-beat"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a claim whose recorded identity no longer matches its live pid must not pass for recovery under way"
   assert_contains "$out" "TURN WOULD END BLIND" "reused-pid claim block must carry the blind-turn banner"
   assert_contains "$out" "2 task(s) in flight" "reused-pid claim block must name the unsupervised work"
@@ -1461,8 +1449,7 @@ test_hook_claude_mode_blocks_on_stuck_arming_claim() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a live owner stuck arming past grace with a stale beacon must not pass for recovery under way"
   assert_contains "$out" "TURN WOULD END BLIND" "stuck-arming claim block must carry the blind-turn banner"
   assert_contains "$out" "2 task(s) in flight" "stuck-arming claim block must name the unsupervised work"
@@ -1485,8 +1472,7 @@ test_hook_claude_mode_allows_on_open_generation_claim() {
   : > "$dir/state/.last-watcher-beat"
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "this case must start with no owner lock at all"
   out=$(run_hook_claude "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "--claude mode must allow when a live open generation claim owns recovery"
   [ -z "$out" ] || fail "open-generation-claim allow produced output: $out"
   pass "fm-turnend-guard --claude: a live open generation claim owns recovery with no lock held"
@@ -1507,8 +1493,7 @@ test_hook_claude_mode_blocks_on_stuck_generation_claim() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a stuck generation claim must not pass for recovery under way"
   assert_contains "$out" "TURN WOULD END BLIND" "stuck-generation-claim block must carry the blind-turn banner"
   assert_contains "$out" "2 task(s) in flight" "stuck-generation-claim block must name the unsupervised work"
@@ -1530,8 +1515,7 @@ test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim() {
   printf 'epoch=3 owner_pid=%s outcome=failed-suppressed updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "the verified attended fail-open still ends the turn once it is spent"
   assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "an abandoned claim suppressed the episode's attended alarm"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "abandoned-claim terminal path did not consume the one-time alarm"
@@ -1601,15 +1585,13 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify the positive recovery watcher"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_integrated_autoarm "$dir"); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "positive watcher recovery must make the auto-arm silent"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive recovery left the failure notice marker"
@@ -1687,19 +1669,15 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    kill "$holder" 2>/dev/null || true
-    wait "$holder" 2>/dev/null || true
+    fm_test_stop "$pid"
+    fm_test_stop "$holder"
     fail "could not identify the frozen-epoch recovery watcher"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   guard_out=$(run_hook_claude "$dir" true); guard_status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$pid"
+  fm_test_stop "$holder"
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$guard_status" "a healthy watcher must still allow the stop after a frozen-epoch alarm"
   [ -z "$guard_out" ] || fail "healthy allow after the frozen-epoch alarm produced output: $guard_out"
@@ -1757,11 +1735,9 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   assert_present "$dir/state/.turnend-claude-blocks" "guard contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "guard contention partially cleared the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "guard contention partially cleared the attended alarm"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   out=$(run_hook_claude "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "the healthy guard must allow after completing the episode reset"
   assert_absent "$dir/state/.turnend-claude-blocks" "successful guard reset left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful guard reset left the failure notice"
@@ -1789,8 +1765,7 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   guard_pid=$!
   wait "$auto_pid"
   wait "$guard_pid"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   auto_status=$(cat "$dir/auto.status")
   guard_status=$(cat "$dir/guard.status")
   case "$auto_status:$guard_status" in
@@ -1895,15 +1870,13 @@ test_hook_claude_mode_allow_resets_budget() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook_claude "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
@@ -1929,8 +1902,7 @@ test_hook_claude_mode_waits_for_late_claim() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=3000 run_hook_claude "$dir" false); status=$?
   holder=$(cat "$dir/holder.pid" 2>/dev/null || true)
   kill "$holder" 2>/dev/null || true
-  kill "$helper" 2>/dev/null || true
-  wait "$helper" 2>/dev/null || true
+  fm_test_stop "$helper"
   expect_code 0 "$status" "--claude must wait briefly for a late auto-arm claim instead of forcing a continuation"
   [ -z "$out" ] || fail "--claude late-claim wait produced output: $out"
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
@@ -1947,8 +1919,7 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pid=$!
   record_autoarm_owner "$dir" "$pid"
   out=$(run_hook_claude "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "--claude mode must allow a claimed secondmate home"
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
@@ -2090,15 +2061,13 @@ test_hook_claude_mode_claim_requires_live_matched_publisher() {
   expect_code 2 "$status" "a claim whose pid the OS reused must not stand in for recovery"
 
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify the live claim publisher"
   }
   printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$pid" "$identity" "$(date +%s)" \
     > "$dir/state/.claude-autoarm-claim"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a live identity-matched claim must be accepted as recovery under way"
   [ -z "$out" ] || fail "--claude live-claim allow produced output: $out"
   pass "fm-turnend-guard --claude: an in-progress claim is trusted only while its publisher is alive and unchanged"
@@ -2179,8 +2148,7 @@ test_hook_claude_mode_trailing_check_catches_claim_published_at_deadline() {
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify the fixture claim publisher"
   }
   cat > "$dir/bin/fm-timing-lib.sh" <<SH
@@ -2205,8 +2173,7 @@ fm_timing_now_ms() {
 }
 SH
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a claim published in the gap between the loop's last evaluation and its deadline break must still be seen by the trailing check"
   [ -z "$out" ] || fail "--claude trailing-check allow produced output: $out"
   pass "fm-turnend-guard --claude: the trailing check catches a claim published right at the deadline"
@@ -2253,16 +2220,14 @@ test_hook_away_daemon_allows_between_watcher_cycles() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live away-mode daemon holder"
   }
   out=$(run_hook "$dir" false); status=$?
   expect_code 0 "$status" "away mode with a live daemon must not block between watcher cycles"
   [ -z "$out" ] || fail "away-mode daemon ownership still produced a block banner: $out"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "--claude away mode with a live daemon must not block between watcher cycles"
   [ -z "$out" ] || fail "--claude away-mode daemon ownership still produced a block banner: $out"
   pass "fm-turnend-guard: a live away-mode daemon satisfies supervision with no watcher holding the lock"
@@ -2276,13 +2241,11 @@ test_hook_away_daemon_allows_over_dead_watcher_lock() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live away-mode daemon holder"
   }
   out=$(run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a live away-mode daemon must outweigh a watcher lock its exited child left behind"
   [ -z "$out" ] || fail "away-mode daemon ownership still produced a block banner: $out"
   pass "fm-turnend-guard: away-mode daemon ownership survives a leftover dead watcher lock"
@@ -2317,8 +2280,7 @@ test_hook_away_mode_blocks_on_pid_reused_daemon() {
   # looks like, and the reason a bare kill -0 is not ownership evidence.
   record_daemon_lock "$dir" "$pid" "some other process identity"
   out=$(run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a live pid whose recorded identity does not match must not satisfy supervision"
   assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
   pass "fm-turnend-guard: away mode blocks on a pid-reused away-mode daemon lock"
@@ -2331,13 +2293,11 @@ test_hook_away_mode_blocks_on_stale_beacon() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live away-mode daemon holder"
   }
   out=$(run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a live daemon that stopped restarting its watcher must block once the beacon goes stale"
   assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
   pass "fm-turnend-guard: away-mode daemon ownership never substitutes for a fresh beacon"
@@ -2350,13 +2310,11 @@ test_hook_daemon_lock_is_ignored_without_away_mode() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live daemon holder"
   }
   out=$(run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "with away mode off the strict watcher predicate must be unchanged"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: a daemon lock proves nothing while away mode is off"
@@ -2377,8 +2335,7 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live away-mode daemon holder"
   }
   # 400s is stale under the flat 300s default, but not under the poll-derived
@@ -2387,8 +2344,7 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace() {
   beat=$(( $(date +%s) - 400 ))
   fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 0 "$status" "a live daemon with a beacon within the poll-derived grace must not block"
   [ -z "$out" ] || fail "away-mode daemon within poll-derived grace still produced a block banner: $out"
   pass "fm-turnend-guard: away-mode beacon freshness uses the poll-derived grace, not the flat default"
@@ -2411,8 +2367,7 @@ test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live away-mode daemon holder"
   }
   # 700s exceeds even the wider poll-derived grace (660 at FM_POLL=600), so a
@@ -2420,8 +2375,7 @@ test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace() {
   beat=$(( $(date +%s) - 700 ))
   fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "a beacon older than the poll-derived grace must still block"
   assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
   pass "fm-turnend-guard: the poll-derived grace is bounded, not unlimited"
@@ -2434,8 +2388,7 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   sleep 60 &
   pid=$!
   record_daemon_lock "$dir" "$pid" || {
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    fm_test_stop "$pid"
     fail "could not identify live daemon holder"
   }
   # 400s would be within the poll-derived grace the away-mode branch would
@@ -2444,8 +2397,7 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   beat=$(( $(date +%s) - 400 ))
   fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   expect_code 2 "$status" "without .afk, FM_POLL must not widen the strict watcher predicate's grace"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"

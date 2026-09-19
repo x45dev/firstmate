@@ -386,8 +386,7 @@ test_viewer_stop_only_signals_owned_processes() {
   printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop rejected a stale process record"
   kill -0 "$holder_pid" 2>/dev/null || fail "stop signalled a PID whose recorded identity did not match"
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  fm_test_stop "$holder_pid"
 
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop failed once the client had detached"
   assert_absent "$record" "a confirmed detach left the viewer record behind"
@@ -408,9 +407,8 @@ test_viewer_stop_requires_the_recorded_parent() {
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "parent-mismatch stop failed"
   kill -0 "$launcher_pid" 2>/dev/null || fail "stop signalled a launcher without its recorded child"
   kill -0 "$viewer_pid" 2>/dev/null || fail "stop signalled a viewer outside the recorded launcher"
-  kill "$launcher_pid" "$viewer_pid" 2>/dev/null || true
-  wait "$launcher_pid" 2>/dev/null || true
-  wait "$viewer_pid" 2>/dev/null || true
+  fm_test_stop "$launcher_pid" launcher
+  fm_test_stop "$viewer_pid" viewer
   run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-parent fixture teardown failed"
   pass "fm-herdr-lab: viewer ownership requires the recorded parent"
 }
@@ -437,7 +435,8 @@ SH
   done
   launcher_pid=$(cat "$started")
   kill -TERM "$command_pid"
-  wait "$command_pid" || status=$?
+  wait_for_exit "$command_pid" 150 || status=$?
+  [ "$status" -ne 124 ] || fail "interrupted viewer start did not exit within 15s of TERM"
   rm -f "$FAKEBIN/python3"
   [ "$status" -ne 0 ] || fail "interrupted viewer start unexpectedly succeeded"
   "$REAL_SLEEP" 0.6

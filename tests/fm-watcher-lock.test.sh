@@ -61,9 +61,8 @@ test_singleton_start() {
     i=$((i + 1))
   done
   grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
-  kill "$pid1" "$pid2" 2>/dev/null || true
-  wait "$pid1" 2>/dev/null || true
-  wait "$pid2" 2>/dev/null || true
+  fm_test_stop "$pid1" "first watcher"
+  fm_test_stop "$pid2" "second watcher"
   pass "simultaneous watcher starts leave exactly one live process"
 }
 
@@ -94,8 +93,7 @@ test_stale_watch_lock_reclaimed() {
   done
   [ "$live" -eq 1 ] || fail "watcher did not reclaim stale lock and stay alive"
   [ "$lock_pid" != "$dead_pid" ] || fail "stale watch lock pid was not replaced"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   pass "killed watcher stale lock is reclaimed"
 }
 
@@ -172,6 +170,9 @@ test_watcher_signal_releases_held_locks() {
   [ "$queue_pid" = "$pid" ] || fail "watcher did not park holding the wake-queue lock (holder '$queue_pid')"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "parked watcher does not hold the singleton lock"
 
+  # One signal and a bounded wait, deliberately not fm_test_stop: this test
+  # asserts the watcher's exit cleanup, and a repeated signal lands inside that
+  # cleanup and cuts it short.
   kill -TERM "$pid" 2>/dev/null || fail "could not signal the parked watcher"
   : > "$release"
   wait_for_exit "$pid" 300
@@ -256,8 +257,7 @@ test_guard_warnings() {
   # Non-git FM_ROOT keeps the worktree-tangle check inert so "fresh watcher ->
   # total silence" stays a pure assertion about watcher state.
   FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid"
   [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
 }
@@ -396,8 +396,7 @@ test_lock_does_not_steal_live_lock() {
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
     printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
   ' _ "$LIB" "$lockdir")
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fm_test_stop "$live"
   case "$out" in
     *"rc=1"*) ;;
     *) fail "live-held lock was acquired instead of refused: $out" ;;
@@ -670,8 +669,7 @@ test_watch_restart_rejects_reused_pid() {
   grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
   is_live_non_zombie "$live" || fail "restart killed a reused unrelated pid"
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fm_test_stop "$live"
   pass "watch restart preserves recovery without signaling a reused pid"
 }
 
@@ -820,8 +818,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
   # After the seed dies without a successor, the attached arm must fail loudly.
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  fm_test_stop "$wpid"
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
@@ -861,8 +858,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   grep -q "arm_pid=$armpid.*watcher_pid=$wpid.*origin=attached.*exit_code=143.*signal=TERM.*reason=arm-interrupted" "$state/.watch-cycle-exits.log" \
     || fail "attached arm signal was not recorded in the lifecycle ledger"
   is_live_non_zombie "$wpid" || fail "signaling an attached arm terminated the peer watcher"
-  kill "$wpid" 2>/dev/null || true
-  wait "$wpid" 2>/dev/null || true
+  fm_test_stop "$wpid"
   pass "attached arm signals record a classified lifecycle entry"
 }
 
@@ -915,8 +911,8 @@ test_arm_starts_and_self_heals() {
     grep -F "watcher: started pid=$lock_pid (beacon fresh)" "$armout" >/dev/null \
       || fail "arm ($row) started line did not name the confirmed live watcher (lock '$lock_pid')"
     kill -0 "$lock_pid" 2>/dev/null || fail "arm ($row) confirmed-started watcher is not actually alive"
-    kill "$armpid" "$lock_pid" 2>/dev/null || true
-    wait "$armpid" 2>/dev/null || true
+    fm_test_stop "$armpid" arm
+    fm_test_stop "$lock_pid" watcher
   done
   pass "arm starts cleanly and resurfaces recovery after a dead-pid lock"
 }
@@ -1024,8 +1020,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm falsely reported FAILED during peer startup race"
   is_live_non_zombie "$armpid" || fail "arm exited while the peer was still healthy"
   # After the peer dies without a successor, the attached arm must fail loudly.
-  kill "$peer" 2>/dev/null || true
-  wait "$peer" 2>/dev/null || true
+  fm_test_stop "$peer"
   wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after peer died (status $status): $(cat "$armout")"
@@ -1057,8 +1052,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   ! grep -qE 'watcher: (healthy|attached)' "$armout" || fail "arm reported attached/healthy off a stale beacon"
   ! grep -qF 'watcher: started' "$armout" || fail "arm falsely reported started"
   is_live_non_zombie "$live" || fail "arm killed the unrelated live lock holder"
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fm_test_stop "$live"
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
 }
 
@@ -1098,8 +1092,7 @@ SH
   grep -qF "watcher: started pid=$successor_pid" "$armout" || fail "successor ledger cycle did not start"
   grep -q "arm_pid=$first_arm.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
     || fail "predecessor ledger record was not linked to its verified successor"
-  kill -HUP "$successor_arm" 2>/dev/null || true
-  wait "$successor_arm" 2>/dev/null || true
+  fm_test_stop "$successor_arm" "successor arm" HUP
   # The forced interruption is a watcher-down interval. Consume the prior
   # delivered wake before beginning independent ledger cycles, just as the
   # recovery handling turn does, so this fixture does not intentionally carry a
@@ -1120,8 +1113,7 @@ SH
       i=$((i + 1))
     done
     grep -qF 'watcher: started pid=' "$armout" || fail "bounded ledger cycle $iteration did not start"
-    kill -HUP "$successor_arm" 2>/dev/null || true
-    wait "$successor_arm" 2>/dev/null || true
+    fm_test_stop "$successor_arm" "bounded ledger arm" HUP
     drain_and_ack "$state" \
       || fail "recovery drain after bounded ledger cycle $iteration failed"
     iteration=$((iteration + 1))
@@ -1159,7 +1151,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   fi
 
   kill -CONT "$watcher_pid" 2>/dev/null || true
-  kill -TERM "$watcher_pid" 2>/dev/null || true
+  fm_test_stop "$watcher_pid" "stopped watcher"
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "terminated stopped-watcher cycle did not surface nonzero (status $status)"
@@ -1209,8 +1201,7 @@ SH
     real_first=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_ALL=C bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
     real_second=$(FM_PROC_ROOT_OVERRIDE="$no_proc" LC_TIME=ko_KR.UTF-8 bash -c 'unset LC_ALL; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
   fi
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fm_test_stop "$live"
   [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under LC_ALL=C"
   [ "$via_lc_all" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_ALL (got '$via_lc_all', want '$baseline')"
   [ "$via_lc_time" = "$baseline" ] || fail "fm_pid_identity varied with exported LC_TIME (got '$via_lc_time', want '$baseline')"
@@ -1319,8 +1310,7 @@ test_msys_pid_identity_uses_proc() {
   sleep 300 &
   live=$!
   identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fm_test_stop "$live"
   case "$identity" in
     proc-starttime=*" cmdline-hex="*) ;;
     *) fail "MSYS process identity did not use compatible /proc fields ('$identity')" ;;

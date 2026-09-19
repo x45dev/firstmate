@@ -408,8 +408,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
-    kill "$control_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
+    fm_test_stop "$control_pid"
     fail "relaunch did not reach trace delivery"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -440,9 +439,8 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     i=$((i + 1))
   done
   [ -e "$ready" ] || {
-    kill "$link_pid" "$control_pid" 2>/dev/null || true
-    wait "$link_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
+    fm_test_stop "$link_pid" "metadata link writer"
+    fm_test_stop "$control_pid" "control writer"
     fail "durable metadata writer did not resume after relaunch delivery committed"
   }
   : > "$release"
@@ -1072,8 +1070,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     i=$((i + 1))
   done
   [ -e "$dir/cwd-race-ready" ] || {
-    kill "$control_pid" 2>/dev/null || true
-    wait "$control_pid" 2>/dev/null || true
+    fm_test_stop "$control_pid"
     fail "relaunch did not reach its pre-publication endpoint check"
   }
   link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1321,8 +1318,7 @@ test_concurrent_relaunch_is_refused() {
   done
   [ -e "$lock" ] || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
   out=$(run_control "$dir" rl19 relaunch --note "concurrent"); rc=$?
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   expect_code 1 "$rc" "a second concurrent control action should refuse"
   assert_contains "$out" "another lifecycle action is already running" \
     "the refusal should name the concurrent action"
@@ -1350,8 +1346,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   done
   [ -e "$lock" ] || fail "could not stage the lifecycle lock"
   out=$(run_spawn "$dir" rl26 --relaunch --harness claude); rc=$?
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   expect_code 1 "$rc" "direct relaunch spawn should refuse a held lifecycle lock"
   assert_contains "$out" "another lifecycle action is already running" \
     "direct relaunch spawn should name lifecycle contention"
@@ -1377,8 +1372,7 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   done
   [ -e "$lock" ] || fail "could not stage the promotion lifecycle lock"
   out=$(FM_HOME="$dir/home" "$PROMOTE" rl29 --mode direct-PR --yolo on 2>&1); rc=$?
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   expect_code 1 "$rc" "promotion should refuse a concurrent lifecycle action"
   assert_contains "$out" "another lifecycle action is already running" \
     "promotion should lock before interpreting the task metadata"

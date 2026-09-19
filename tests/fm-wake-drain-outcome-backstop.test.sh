@@ -454,8 +454,7 @@ test_index_self_heal_runs_under_the_outcome_lock() {
     || fail "contested lock did not skip the backstop: $(cat "$busy_out")"
   [ ! -f "$state/.branch-outcome-index-ready" ] \
     || fail "self-heal published a ready marker without holding the outcome lock"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$healed_out" \
     || fail "drain failed after the outcome lock was released"

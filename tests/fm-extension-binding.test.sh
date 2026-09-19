@@ -95,8 +95,7 @@ extension_test_cleanup() {
   [ -z "$override_crash_runner_pid" ] || kill -TERM -"$override_crash_runner_pid" 2>/dev/null || true
   [ -z "$handshake_orphan_pid" ] || kill -KILL "$handshake_orphan_pid" 2>/dev/null || true
   if [ -n "$section_coordinator_pid" ]; then
-    kill -TERM "$section_coordinator_pid" 2>/dev/null || true
-    wait "$section_coordinator_pid" 2>/dev/null || true
+    fm_test_stop "$section_coordinator_pid" "section coordinator"
   fi
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ] && [ -f "${REMOTE_ROOT:-}/bin/fm-remote-job-lib.sh" ]; then
     (
@@ -108,12 +107,10 @@ extension_test_cleanup() {
   fi
   if [ -n "$first_bind_pid" ]; then
     kill -CONT "$first_bind_pid" 2>/dev/null || true
-    kill -TERM "$first_bind_pid" 2>/dev/null || true
-    wait "$first_bind_pid" 2>/dev/null || true
+    fm_test_stop "$first_bind_pid" "first bind"
   fi
   if [ -n "$second_bind_pid" ]; then
-    kill -TERM "$second_bind_pid" 2>/dev/null || true
-    wait "$second_bind_pid" 2>/dev/null || true
+    fm_test_stop "$second_bind_pid" "second bind"
   fi
   chmod -R u+w "$TMP_ROOT_RAW" 2>/dev/null || true
   fm_test_cleanup
@@ -1073,7 +1070,7 @@ done
 if kill -0 "$crash_silent_start_pid" 2>/dev/null; then
   kill -TERM "$crash_silent_start_pid" 2>/dev/null || true
   [ -z "$crash_silent_runner_pid" ] || kill -TERM -"$crash_silent_runner_pid" 2>/dev/null || true
-  wait "$crash_silent_start_pid" 2>/dev/null || true
+  fm_test_stop "$crash_silent_start_pid" "crash-silent start"
   crash_silent_start_pid=
   crash_silent_runner_pid=
   fail "inner host crash during result.silent wedged its runner before result.terminal"
@@ -1226,8 +1223,7 @@ for _ in $(seq 1 400); do
 done
 [ -n "$owner_worker_pid" ] || fail "retirement worker never acquired its lifecycle lock"
 [ "$owner_worker_pid" != "$owner_retire_pid" ] || fail "retirement fixture did not cross the public wrapper boundary"
-kill -TERM "$owner_retire_pid" 2>/dev/null || true
-wait "$owner_retire_pid" 2>/dev/null || true
+fm_test_stop "$owner_retire_pid" "retirement wrapper"
 owner_retire_pid=
 FM_HOME="$H_LOCK_OWNER" "$PROCEVENT" register-extension ext-lock-owner owner-source --config-ref good > "$TMP_ROOT/lock-owner-register.out" 2>&1 &
 owner_register_pid=$!
@@ -1753,7 +1749,9 @@ signal_cleanup_group_pid=$(owner_group_pid "$signal_owner") \
   || fail "signal cleanup fixture published no exact process group"
 kill -TERM "$signal_cleanup_host_pid" 2>/dev/null || fail "cannot interrupt the active extension host"
 signal_cleanup_rc=0
-wait "$signal_cleanup_host_pid" || signal_cleanup_rc=$?
+wait_for_exit "$signal_cleanup_host_pid" 150 || signal_cleanup_rc=$?
+[ "$signal_cleanup_rc" -ne 124 ] \
+  || fail "interrupted extension host did not exit within 15s of TERM"
 signal_cleanup_host_pid=
 [ "$signal_cleanup_rc" -ne 0 ] || fail "interrupted extension host unexpectedly succeeded"
 if kill -0 -"$signal_cleanup_group_pid" 2>/dev/null; then

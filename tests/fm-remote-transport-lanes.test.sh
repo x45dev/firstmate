@@ -285,8 +285,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 [ -n "$QUEUED_JOB" ] || fail "the doomed caller's job never appeared in the queue"
-kill -TERM "$QUEUED_CALLER" 2>/dev/null || true
-wait "$QUEUED_CALLER" 2>/dev/null || true
+fm_test_stop "$QUEUED_CALLER" "queued caller"
 for _ in $(seq 1 200); do
   [ ! -d "$STATE_ROOT/jobs/$QUEUED_JOB" ] && break
   sleep 0.05
@@ -310,8 +309,7 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 assert_present "$RUN_START" "the running-cancellation fixture never started"
-kill -TERM "$RUNNING_CALLER" 2>/dev/null || true
-wait "$RUNNING_CALLER" 2>/dev/null || true
+fm_test_stop "$RUNNING_CALLER" "running caller"
 CANCEL_BEGAN=$(date +%s)
 for _ in $(seq 1 200); do
   ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 || break

@@ -53,8 +53,7 @@ cleanup() {
   local worker_pid=''
   if [ -n "$PUBLISH_PID" ]; then
     touch "$PUBLISH_RELEASE" 2>/dev/null || true
-    kill "$PUBLISH_PID" 2>/dev/null || true
-    wait "$PUBLISH_PID" 2>/dev/null || true
+    fm_test_stop "$PUBLISH_PID"
   fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true

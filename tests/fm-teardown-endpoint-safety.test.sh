@@ -131,8 +131,7 @@ test_control_lock_contention_refuses_before_mutation() {
     i=$((i + 1))
   done
   [ -e "$lock" ] || {
-    kill "$holder" 2>/dev/null || true
-    wait "$holder" 2>/dev/null || true
+    fm_test_stop "$holder"
     fail "could not stage a held lifecycle lock"
   }
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -151,8 +150,7 @@ test_control_lock_contention_refuses_before_mutation() {
     || fail "contended teardown reached the runtime: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "another lifecycle action is already running" \
     "contended teardown should serialize before reading mutable task metadata"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   pass "fm-teardown: a concurrent lifecycle action refuses before mutation"
 }
 
@@ -178,8 +176,7 @@ test_non_pool_teardown_ignores_task_set_lock() {
     i=$((i + 1))
   done
   [ -e "$ready" ] || {
-    kill "$holder" 2>/dev/null || true
-    wait "$holder" 2>/dev/null || true
+    fm_test_stop "$holder"
     fail "could not stage an in-progress task publication"
   }
 
@@ -187,8 +184,7 @@ test_non_pool_teardown_ignores_task_set_lock() {
     || fail "non-pool teardown was blocked by an unrelated task publication: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$id.meta" "non-pool teardown left task metadata"
   assert_present "$lock" "non-pool teardown removed the publisher's lock"
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
   pass "fm-teardown: non-pool cleanup ignores unrelated task publication locks"
 }
 
@@ -217,8 +213,7 @@ test_metadata_lock_serializes_destructive_cleanup() {
     i=$((i + 1))
   done
   [ -e "$ready" ] || {
-    kill "$holder" 2>/dev/null || true
-    wait "$holder" 2>/dev/null || true
+    fm_test_stop "$holder"
     fail "could not stage a held metadata lock"
   }
 
@@ -327,12 +322,10 @@ test_recorded_process_identity_cleanup_is_exact() {
     || fail "recorded process identity changed before cleanup"
   live_command=$(ps -p "$target_record" -o comm= 2>/dev/null | tr -d '[:space:]')
   case "$live_command" in sleep) ;; *) fail "recorded target pid no longer belongs to the expected child" ;; esac
-  kill -TERM "$target_record"
-  wait "$target_record" 2>/dev/null || true
+  fm_test_stop "$target_record" "recorded target"
   kill -0 "$target_record" 2>/dev/null && fail "exact target pid survived cleanup"
   kill -0 "$control_record" 2>/dev/null || fail "independent control process was disturbed"
-  kill -TERM "$control_record"
-  wait "$control_record" 2>/dev/null || true
+  fm_test_stop "$control_record" "control child"
   pass "process cleanup: creation-time PID identity removes only the exact child and preserves the control child"
 }
 
@@ -478,8 +471,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
     || fail "teardown reached the runtime on a contested pool slot: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "refusal should name the other task holding the slot"
-  kill "$worker" 2>/dev/null || true
-  wait "$worker" 2>/dev/null || true
+  fm_test_stop "$worker"
 
   # The same collision recorded on a secondmate home field rather than a task
   # worktree is the same slot, and refuses the same way.
@@ -563,8 +555,7 @@ test_sole_slot_record_still_tears_down() {
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
-  kill "$worker" 2>/dev/null || true
-  wait "$worker" 2>/dev/null || true
+  fm_test_stop "$worker"
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
@@ -815,8 +806,7 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
-  kill "$holder" 2>/dev/null || true
-  wait "$holder" 2>/dev/null || true
+  fm_test_stop "$holder"
 
   [ "$rc" -ne 0 ] \
     || fail "a remote-seeded home returned a pool slot while its local child held the shared lock"
@@ -881,8 +871,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
   assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
     "the warning should name the claimant's home"
-  kill "$worker" 2>/dev/null || true
-  wait "$worker" 2>/dev/null || true
+  fm_test_stop "$worker"
 
   # The same reassignment on a CLEAN slot: a landed ship task torn down without
   # --force, which is the shape of the real incident. A clean, fully landed copy
@@ -910,8 +899,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
-  kill "$worker" 2>/dev/null || true
-  wait "$worker" 2>/dev/null || true
+  fm_test_stop "$worker"
 
   # A claim that exists but cannot be read as a claim proves nothing either way,
   # so it refuses rather than guessing the slot is still this task's.

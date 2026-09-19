@@ -211,14 +211,12 @@ JS
   while ! fm_gemini_pid_is_gemini "$pid"; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 100 ]; then
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      fm_test_stop "$pid" "gemini fixture"
       fail "Gemini interpreter and script paths containing spaces must retain process identity"
     fi
     sleep 0.01
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  fm_test_stop "$pid" "gemini fixture"
   pass "fm-gemini-lib.sh: process argv preserves whitespace in interpreter and Gemini script paths"
 }
 

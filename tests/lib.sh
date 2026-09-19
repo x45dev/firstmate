@@ -161,6 +161,82 @@ fm_test_reap_procevent_homes() {
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
+# --- bounded process stop ---------------------------------------------------
+#
+# fm_test_stop <pid> [label] [signal]
+#
+# Stop a background process a test started and reap it, within a bound. The
+# signal defaults to TERM; a test that exercises another handler, such as HUP,
+# names it. One TERM followed by a bare `wait` is not a stop: a bash script
+# that traps TERM can lose that signal outright. GNU bash 5.2 runs a trap that
+# lands while it is parsing a command substitution in the half-built parser state, the trap
+# action fails with "unexpected EOF while looking for matching `)'", and the
+# script carries on as if never signaled. A watcher polls through hundreds of
+# command substitutions a second, so roughly one TERM in a few hundred is lost,
+# and the bare `wait` behind it then blocks with no output until CI's job cap
+# cancels the whole shard. The race is per signal, so the signal is repeated
+# every FM_TEST_STOP_RETERM_SECONDS; a process still alive at
+# FM_TEST_STOP_BOUND_SECONDS is killed, its process tree is printed, and the
+# test fails naming what it was waiting for rather than hanging.
+FM_TEST_STOP_RETERM_SECONDS=${FM_TEST_STOP_RETERM_SECONDS:-5}
+FM_TEST_STOP_BOUND_SECONDS=${FM_TEST_STOP_BOUND_SECONDS:-30}
+
+fm_test_stop() {
+  local pid=$1 label=${2:-process} sig=${3:-TERM} ticks=0 reterm bound args stat child
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  reterm=$((FM_TEST_STOP_RETERM_SECONDS * 10))
+  bound=$((FM_TEST_STOP_BOUND_SECONDS * 10))
+  args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+  kill -"$sig" "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null; do
+    stat=$(ps -o stat= -p "$pid" 2>/dev/null || true)
+    case "$stat" in Z*|'') break ;; esac
+    if [ "$ticks" -ge "$bound" ]; then
+      {
+        printf '# %s (pid %s) outlived %s for %ss; process tree:\n' \
+          "$label" "$pid" "$sig" "$FM_TEST_STOP_BOUND_SECONDS"
+        ps -o pid,ppid,stat,etime,args -p "$pid" 2>/dev/null | sed 's/^/#   /'
+        for child in $(pgrep -P "$pid" 2>/dev/null); do
+          ps -o pid=,ppid=,stat=,etime=,args= -p "$child" 2>/dev/null | sed 's/^/#   /'
+        done
+      } >&2
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "$label (pid $pid) did not stop within ${FM_TEST_STOP_BOUND_SECONDS}s of $sig: ${args:-command line unavailable}"
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+    if [ $((ticks % reterm)) -eq 0 ]; then
+      kill -"$sig" "$pid" 2>/dev/null || true
+    fi
+  done
+  wait "$pid" 2>/dev/null || true
+}
+
+wait_for_exit() {
+  local pid=$1 limit=${2:-50} i=0
+  while [ "$i" -lt "$limit" ]; do
+    if ! is_live_non_zombie "$pid"; then
+      wait "$pid"
+      return "$?"
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fm_test_stop "$pid" "a process that outlived its wait_for_exit limit"
+  return 124
+}
+
+is_live_non_zombie() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_procevent_homes

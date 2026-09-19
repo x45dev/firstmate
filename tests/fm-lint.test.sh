@@ -1261,15 +1261,16 @@ SH
         i=$((i + 1))
       done
       [ -s "$pid_file" ] || {
-        kill -TERM "$parent_pid" 2>/dev/null || true
-        wait "$parent_pid" 2>/dev/null || true
+        fm_test_stop "$parent_pid" "lint parent"
         fail "jobs=$jobs telemetry=$telemetry did not start ShellCheck"
       }
       shellcheck_pid=$(cat "$pid_file")
       kill -TERM "$parent_pid" 2>/dev/null \
         || fail "jobs=$jobs telemetry=$telemetry parent could not be interrupted"
       parent_rc=0
-      wait "$parent_pid" 2>/dev/null || parent_rc=$?
+      wait_for_exit "$parent_pid" 300 || parent_rc=$?
+      [ "$parent_rc" -ne 124 ] \
+        || fail "jobs=$jobs telemetry=$telemetry parent did not exit within 30s of TERM"
       survivor=0
       i=0
       while [ "$i" -lt 100 ] && kill -0 "$shellcheck_pid" 2>/dev/null; do

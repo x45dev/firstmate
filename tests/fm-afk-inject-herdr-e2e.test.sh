@@ -33,6 +33,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
@@ -62,12 +64,12 @@ LOOP_SCRIPT=
 cleanup_all() {
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
-    kill "$DAEMON_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" 2>/dev/null || true
+    fm_test_stop "$DAEMON_PID" "afk daemon"
   fi
   herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
+  fm_test_cleanup
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
@@ -295,8 +297,7 @@ start_daemon() {
 stop_daemon() {
   [ -n "${DAEMON_PID:-}" ] || return 0
   afk_exit "$STATE_DIR" 2>/dev/null || true
-  kill "$DAEMON_PID" 2>/dev/null || true
-  wait "$DAEMON_PID" 2>/dev/null || true
+  fm_test_stop "$DAEMON_PID" "afk daemon"
   DAEMON_PID=""
   sleep 1
 }

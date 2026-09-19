@@ -20,6 +20,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
@@ -38,6 +40,7 @@ chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
 GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
+  fm_test_cleanup
   local s
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
@@ -275,8 +278,7 @@ unit_fresh_vs_refresh() {
   else
     fail "refresh: incorrectly cleared the current session's buffered escalations"
   fi
-  kill "$sleep_pid" 2>/dev/null || true
-  wait "$sleep_pid" 2>/dev/null || true
+  fm_test_stop "$sleep_pid" "refresh sleeper"
   rm -rf "$st"
 }
 
@@ -320,8 +322,7 @@ unit_stop_ordering() {
   else
     fail "stop-ordering: record not removed"
   fi
-  kill "$daemon_pid" 2>/dev/null || true
-  wait "$daemon_pid" 2>/dev/null || true
+  fm_test_stop "$daemon_pid" "fixture daemon"
   rm -rf "$st"
 }
 
@@ -343,8 +344,7 @@ unit_stop_rejects_reused_pid() {
   else
     fail "stop identity: stale lock signaled an unrelated live process"
   fi
-  kill "$sleeper_pid" 2>/dev/null || true
-  wait "$sleeper_pid" 2>/dev/null || true
+  fm_test_stop "$sleeper_pid" "fixture sleeper"
   rm -rf "$st"
 }
 
@@ -453,8 +453,7 @@ unit_signal_exits_with_lock_cleanup() {
     sleep 0.05
   done
   [ "$locked" = 1 ] || fail "launcher signal: lifecycle never acquired its lock to interrupt"
-  kill -TERM "$child" 2>/dev/null || true
-  wait "$child" 2>/dev/null || true
+  fm_test_stop "$child" "launcher"
   # The signal handler releases the lock as it exits; give that removal a
   # bounded settle rather than sampling the instant `wait` returns.
   for _ in $(seq 1 100); do
@@ -810,8 +809,7 @@ unit_stop_validates_before_signal() {
   else
     fail "stop validation: malformed record signaled daemon or cleared state"
   fi
-  kill "$sleeper_pid" 2>/dev/null || true
-  wait "$sleeper_pid" 2>/dev/null || true
+  fm_test_stop "$sleeper_pid" "fixture sleeper"
   rm -rf "$st"
 }
 
@@ -903,8 +901,7 @@ unit_refresh_validates_record() {
   else
     fail "refresh record: malformed terminal identity was accepted"
   fi
-  kill "$daemon_pid" 2>/dev/null || true
-  wait "$daemon_pid" 2>/dev/null || true
+  fm_test_stop "$daemon_pid" "fixture daemon"
   rm -rf "$st"
 }
 
