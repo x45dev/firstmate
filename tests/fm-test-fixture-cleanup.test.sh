@@ -287,7 +287,7 @@ test_stop_fails_loudly_on_a_process_that_ignores_term() {
   assert_contains "$err" "outlived TERM for 1s; process tree:" \
     "fm_test_stop did not print the stuck process tree before failing: $err"
   pid=$(cat "$harness/case/fixture.pid")
-  printf '%s\n' "$err" | grep -Eq "^#[[:space:]]+$pid[[:space:]]+[0-9]+[[:space:]]+.*bash -c" \
+  printf '%s\n' "$err" | grep -Eq "^#[[:space:]]+${pid}[[:space:]]+[0-9]+[[:space:]]+.*bash -c" \
     || fail "fm_test_stop's process tree did not include the stuck process's own row: $err"
   if kill -0 "$pid" 2>/dev/null && [ "$(ps -o stat= -p "$pid" 2>/dev/null | cut -c1)" != Z ]; then
     fail "fm_test_stop failed the test but left the TERM-ignoring process running"
