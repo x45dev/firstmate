@@ -170,9 +170,12 @@ test_watcher_signal_releases_held_locks() {
   [ "$queue_pid" = "$pid" ] || fail "watcher did not park holding the wake-queue lock (holder '$queue_pid')"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] || fail "parked watcher does not hold the singleton lock"
 
+  # One signal and a bounded wait, deliberately not fm_test_stop: this test
+  # asserts the watcher's exit cleanup, and a repeated signal lands inside that
+  # cleanup and cuts it short.
   kill -TERM "$pid" 2>/dev/null || fail "could not signal the parked watcher"
   : > "$release"
-  fm_test_stop "$pid" "parked watcher"
+  wait_for_exit "$pid" 300
   wait "$holder" 2>/dev/null || true
 
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
