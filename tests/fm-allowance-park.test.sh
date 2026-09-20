@@ -22,12 +22,32 @@
 # two-signal check whose signals are never separated is indistinguishable from a
 # one-signal check: each case that asserts the verdict survives losing a signal
 # first asserts that the signal really is absent.
+#
+# The same file also pins what supervision DOES about a park, because detecting
+# one and leaving it stopped is most of the original defect: on 2026-09-11 five
+# workers parked at once and the wake told its reader to press Enter, which
+# submits nothing into the empty composer an ENDED turn leaves behind; on
+# 2026-09-20 three sat stopped overnight past their reset until a person messaged
+# each one by hand. So the resume cases below assert a steering record rather
+# than a keystroke, exactly once per park, and never while the provider still
+# reports the allowance spent - a message sent into a spent allowance is consumed
+# for nothing and the worker parks again on the same turn.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-allowance-lib.sh"
+# The resume rides the ordinary steering-inbox plane, so the record format is
+# read back through its own owner rather than re-derived here.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-inbox-lib.sh"
+
+# The provider read is cached per home for FM_ALLOWANCE_QUOTA_TTL seconds so a
+# fleet of parked workers costs one subprocess rather than one each. The resume
+# cases below flip the provider's answer between watcher runs to prove which gate
+# is holding a message back, so that cache is disabled for the whole file.
+export FM_ALLOWANCE_QUOTA_TTL=0
 
 WATCH="$ROOT/bin/fm-watch.sh"
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
@@ -41,18 +61,42 @@ reap() { fm_test_stop "$1" "${2:-watcher}"; }
 # including the resume affordance that never reaches the transcript.
 PARKED_PANE_LINE="You've hit your session limit · resets 8:30am (UTC) · Press Enter to continue after reset"
 
-# write_transcript <file> <cwd> <parked|resumed>
+# set_mtime <epoch> <path>
+# Portable mtime stamping: BSD date takes -r, GNU date takes -d @<epoch>.
+set_mtime() {  # <epoch> <path>
+  local epoch=$1 path=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$path"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$path"
+  fi
+}
+
+# write_transcript <file> <cwd> <parked|resumed> [reset-epoch|none]
 # A Claude Code session transcript whose LAST conversational record is either the
 # refusal itself (parked) or an ordinary reply that landed after it (resumed).
 # The refusal record carries the vendor's own machine-readable error fields; the
 # trailing non-conversational record is there because a real transcript has one,
 # and the fold must skip it rather than stop at it.
-write_transcript() {  # <file> <cwd> <mode>
-  local file=$1 cwd=$2 mode=$3
+#
+# <reset-epoch> is the absolute reset the vendor records beside those fields,
+# defaulting to an hour out - the shape of a park that has only just happened,
+# where the transcript cannot yet have crossed its own reset. `none` writes the
+# null quotaLimits older Claude Code builds wrote instead, which is what a
+# transcript with no recorded reset at all looks like.
+write_transcript() {  # <file> <cwd> <mode> [reset-epoch|none]
+  local file=$1 cwd=$2 mode=$3 reset=${4:-} quota
+  [ -n "$reset" ] || reset=$(( $(date -u +%s) + 3600 ))
+  if [ "$reset" = none ]; then
+    quota='"quotaLimits":null'
+  else
+    quota=$(printf '"quotaLimits":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour"}' "$reset")
+  fi
   {
     printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"go"}}\n' "$cwd"
     printf '{"type":"assistant","cwd":"%s","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}\n' "$cwd"
-    printf '{"type":"assistant","cwd":"%s","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You'"'"'ve hit your session limit · resets 8:30am (UTC)"}]},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}\n' "$cwd"
+    printf '{"type":"assistant","cwd":"%s","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You'"'"'ve hit your session limit · resets 8:30am (UTC)"}]},%s,"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}\n' "$cwd" "$quota"
     if [ "$mode" = resumed ]; then
       printf '{"type":"assistant","cwd":"%s","message":{"role":"assistant","content":[{"type":"text","text":"resumed after the reset"}]}}\n' "$cwd"
     fi
@@ -60,17 +104,24 @@ write_transcript() {  # <file> <cwd> <mode>
   } > "$file"
 }
 
-# make_store <dir> <worktree> <parked|resumed|none>
+# make_store <dir> <worktree> <parked|resumed|none> [reset-epoch|none] [mtime-epoch]
 # A CLAUDE_CONFIG_DIR-shaped transcript store for <worktree>, using the same
 # directory mangling Claude Code derives from the session's working directory.
 # "none" builds the store with no transcript in it at all, which is how a case
 # takes the structural signal away without also taking the store away.
-make_store() {  # <dir> <worktree> <mode>
-  local base=$1 wt=$2 mode=$3 mangled dir
+#
+# <mtime-epoch> stamps the transcript, because the time bound compares that mtime
+# against the recorded reset and a fixture written just now is always "after"
+# anything in the past.
+make_store() {  # <dir> <worktree> <mode> [reset-epoch|none] [mtime-epoch]
+  local base=$1 wt=$2 mode=$3 reset=${4:-} mtime=${5:-} mangled dir
   mangled=$(printf '%s' "$wt" | tr '/.' '--')
   dir="$base/projects/$mangled"
   mkdir -p "$dir"
-  [ "$mode" = none ] || write_transcript "$dir/session.jsonl" "$wt" "$mode"
+  if [ "$mode" != none ]; then
+    write_transcript "$dir/session.jsonl" "$wt" "$mode" "$reset"
+    [ -z "$mtime" ] || set_mtime "$mtime" "$dir/session.jsonl"
+  fi
   printf '%s\n' "$dir"
 }
 
@@ -127,6 +178,63 @@ test_record_signal_is_current_state_not_history() {
   ! _fm_allowance_record_parked "$dir/resumed.jsonl" \
     || fail "a transcript that resumed after its refusal was still read as parked"
   pass "the record signal reports the last conversational record, not any refusal in history"
+}
+
+test_record_signal_stops_claiming_once_the_transcript_crossed_its_reset() {
+  local dir wt now store out
+  dir="$TMP_ROOT/record-bound"; wt="$dir/wt"; mkdir -p "$wt"
+  now=$(date -u +%s)
+
+  # Still parked, an hour past its reset: the transcript froze when the turn was
+  # refused and has not been written since, which is what a worker sitting at its
+  # limit prompt looks like however long it sits there.
+  store=$(make_store "$dir/still" "$wt" parked "$(( now - 3600 ))" "$(( now - 7200 ))")
+  [ -f "$store/session.jsonl" ] || fail "the still-parked fixture has no transcript"
+  out=$(CLAUDE_CONFIG_DIR="$dir/still" fm_allowance_park_detail claude "$wt" '') \
+    || fail "a worker still frozen at its limit prompt past its reset was not read as parked"
+  case "$out" in
+    "session-record "*) ;;
+    *) fail "expected the structural source to carry the still-parked verdict, got: $out" ;;
+  esac
+
+  # The same refusal, the same reset, and a transcript that has been written
+  # since that reset - which only a worker that took a turn can do. The fold is
+  # deliberately asserted first: it still reads the refusal as the last
+  # conversational record, so the ONLY thing that changed the verdict is the time
+  # bound, and this case cannot go vacuous by the fold quietly answering instead.
+  store=$(make_store "$dir/moved" "$wt" parked "$(( now - 3600 ))" "$now")
+  _fm_allowance_record_parked "$store/session.jsonl" >/dev/null \
+    || fail "the moved fixture's last conversational record is not the refusal, so the bound is not what this case tests"
+  ! CLAUDE_CONFIG_DIR="$dir/moved" fm_allowance_park_detail claude "$wt" '' \
+    || fail "a transcript written since its own recorded reset was still asserted parked"
+
+  # A build that recorded no reset has no bound, and must behave exactly as it
+  # did before the bound existed rather than losing the verdict to it.
+  store=$(make_store "$dir/unrecorded" "$wt" parked none "$now")
+  ! _fm_allowance_record_reset "$store/session.jsonl" >/dev/null 2>&1 \
+    || fail "the unrecorded fixture still carries a reset, so it proves nothing"
+  CLAUDE_CONFIG_DIR="$dir/unrecorded" fm_allowance_park_detail claude "$wt" '' >/dev/null \
+    || fail "a refusal record with no recorded reset lost its verdict to the time bound"
+
+  pass "the record signal stops claiming a park once the transcript crossed its own recorded reset"
+}
+
+test_crew_state_stops_claiming_a_park_the_worker_has_worked_past() {
+  local dir wt state now out
+  dir="$TMP_ROOT/crew-state-bound"; wt="$dir/wt"; state="$dir/state"
+  mkdir -p "$wt" "$state"
+  now=$(date -u +%s)
+  # The defect this pins: the same transcript reported `parked · source:
+  # allowance` after the reset had passed AND after the worker was resumed and
+  # was visibly working, so only a pane peek could tell stopped from running.
+  make_store "$dir/store" "$wt" parked "$(( now - 3600 ))" "$now" >/dev/null
+  printf 'window=test:fm-worked-past\nkind=ship\nharness=claude\nworktree=%s\n' "$wt" > "$state/worked-past.meta"
+  out=$(CLAUDE_CONFIG_DIR="$dir/store" FM_STATE_OVERRIDE="$state" "$CREW_STATE" worked-past) \
+    || fail "fm-crew-state.sh failed on a worker that worked past its reset"
+  case "$out" in
+    *"source: allowance"*) fail "a worker whose transcript moved past its reset was still reported parked: $out" ;;
+  esac
+  pass "fm-crew-state.sh stops asserting an allowance park once the worker has taken a turn since the reset"
 }
 
 test_unsupported_harness_never_parks() {
@@ -237,15 +345,15 @@ test_crew_state_leaves_an_unparked_crew_alone() {
 # caller. The crew is fixed PROVABLY WORKING by launch_case_watcher below: that
 # is the whole point of these cases, because the park is exactly the condition
 # every existing liveness read calls healthy.
-build_parked_case() {  # <name> <mode> <pane-text>
-  local name=$1 mode=$2 pane=$3 key
+build_parked_case() {  # <name> <mode> <pane-text> [reset-epoch|none] [mtime-epoch]
+  local name=$1 mode=$2 pane=$3 reset=${4:-} mtime=${5:-} key
   CASE_DIR=$(make_case "$name")
   CASE_STATE="$CASE_DIR/state"
   CASE_CAPTURE="$CASE_DIR/pane.txt"
   CASE_WINDOW="test:fm-$name"
   CASE_WT="$CASE_DIR/wt"
   mkdir -p "$CASE_WT"
-  make_store "$CASE_DIR/store" "$CASE_WT" "$mode" >/dev/null
+  make_store "$CASE_DIR/store" "$CASE_WT" "$mode" "$reset" "$mtime" >/dev/null
   printf '%s\n' "$pane" > "$CASE_CAPTURE"
   printf 'window=%s\nkind=ship\nharness=claude\nworktree=%s\n' \
     "$CASE_WINDOW" "$CASE_WT" > "$CASE_STATE/$name.meta"
@@ -281,8 +389,13 @@ test_watcher_surfaces_a_park_it_would_otherwise_call_healthy() {
     || { reap "$CASE_PID"; fail "the watcher never surfaced a parked worker: $(cat "$CASE_OUT")"; }
   grep -Fq "parked on the account allowance" "$CASE_OUT" \
     || fail "the wake did not name the allowance as the cause: $(cat "$CASE_OUT")"
-  grep -Fq "single Enter" "$CASE_OUT" \
+  grep -Fq "steering message" "$CASE_OUT" \
     || fail "the wake did not name the recovery: $(cat "$CASE_OUT")"
+  # The wording this replaced sent an operator down the keystroke path on
+  # 2026-09-11, where Enter reported success for five parked workers and moved
+  # none of them, so the wake must not offer it as the recovery again.
+  ! grep -Fq "single Enter" "$CASE_OUT" \
+    || fail "the wake still tells its reader to press Enter: $(cat "$CASE_OUT")"
   grep -Fq "$CASE_WINDOW" "$CASE_OUT" \
     || fail "the wake did not name the window: $(cat "$CASE_OUT")"
   FM_STATE_OVERRIDE="$CASE_STATE" "$DRAIN" > "$drain_out" 2>/dev/null \
@@ -383,16 +496,189 @@ test_watcher_surfaces_a_pane_only_park_once_across_relaunches() {
   pass "a pane-only park surfaces once per episode instead of re-waking on every poll"
 }
 
+# --- fm-watch.sh: the park is RESUMED, not just reported ---------------------
+
+# Every resume case shares one account-level question - "is the allowance back" -
+# so they share one fake provider whose answer a case flips through a file. The
+# verdicts are the two the real report distinguishes: a known scope with headroom
+# through its reset, and a known scope the provider itself calls exhausted now.
+install_fake_quota() {  # <fakebin> <verdict-file>
+  local fakebin=$1 verdict_file=$2
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then printf 'quota-axi 0.1.29\n'; exit 0; fi
+case "$(cat "${FM_FAKE_QUOTA_VERDICT:-/nonexistent}" 2>/dev/null || true)" in
+  ready)
+    printf '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":64,"runway":{"status":"through_reset"}}]}}]}\n'
+    ;;
+  spent)
+    printf '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}\n'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/quota-axi"
+  export FM_FAKE_QUOTA_VERDICT="$verdict_file"
+}
+
+# The steering records the resume wrote for <task>, newest sequence last.
+inbox_records() {  # <state> <task>
+  local f
+  for f in "$1/$2.inbox"/*.msg; do
+    [ -e "$f" ] || continue
+    printf '%s\n' "$f"
+  done
+}
+
+inbox_count() {  # <state> <task>
+  inbox_records "$1" "$2" | grep -c . || true
+}
+
+# Wait for <task> to accumulate <count> steering records, or give up. The second
+# half of a gate case runs a watcher that has already surfaced this park, so it
+# never exits on a wake and there is nothing to wait for except the record
+# itself.
+wait_for_inbox() {  # <state> <task> <count> [limit-ticks]
+  local state=$1 task=$2 want=$3 limit=${4:-150} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(inbox_count "$state" "$task")" -lt "$want" ] || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# A park that is genuinely over: an hour past its recorded reset, with a
+# transcript that has not been written since it froze. This is the overnight
+# shape - the worker is stopped, the allowance is back, and before this change
+# nothing moved until a person noticed.
+build_resumable_case() {  # <name> <verdict>
+  local name=$1 verdict=$2 now
+  now=$(date -u +%s)
+  build_parked_case "$name" parked "$PARKED_PANE_LINE" "$(( now - 3600 ))" "$(( now - 7200 ))"
+  printf '%s' "$verdict" > "$CASE_DIR/quota-verdict"
+  install_fake_quota "$CASE_DIR/fakebin" "$CASE_DIR/quota-verdict"
+}
+
+test_watcher_resumes_a_parked_worker_whose_allowance_is_back() {
+  local rec body
+  command -v jq >/dev/null 2>&1 \
+    || fail "jq is missing, so the provider gate could not be exercised - this is not a pass"
+  build_resumable_case allowance-resume ready
+  [ "$(inbox_count "$CASE_STATE" allowance-resume)" -eq 0 ] \
+    || fail "the fixture already had a steering record, so nothing below proves the resume wrote one"
+  launch_case_watcher "$CASE_DIR/watch.out"
+  wait_for_exit "$CASE_PID" 100 \
+    || { reap "$CASE_PID"; fail "the watcher never surfaced the resumable park: $(cat "$CASE_OUT")"; }
+
+  [ "$(inbox_count "$CASE_STATE" allowance-resume)" -eq 1 ] \
+    || fail "a parked worker past its reset was not sent exactly one steering message (found $(inbox_count "$CASE_STATE" allowance-resume))"
+  rec=$(inbox_records "$CASE_STATE" allowance-resume | tail -1)
+  body=$(fm_task_inbox_body "$rec") || fail "the resume record has no readable body"
+  # The turn ENDED, so the composer is empty and a keystroke submits nothing.
+  # What the worker gets has to be a message it can act on.
+  case "$body" in
+    *"allowance"*) ;;
+    *) fail "the resume record does not tell the worker what happened: $body" ;;
+  esac
+  [ "${#body}" -gt 40 ] \
+    || fail "the resume is not a message a stopped worker can act on: $body"
+
+  # Same park, same worker, a later watcher: the episode is already resumed and
+  # must not collect a second message every poll.
+  FM_STATE_OVERRIDE="$CASE_STATE" "$DRAIN" > "$CASE_DIR/drain2.out" 2> "$CASE_DIR/drain2.err" || true
+  ack_drain_err "$CASE_STATE" "$CASE_DIR/drain2.err" \
+    || fail "could not acknowledge the first allowance wake"
+  launch_case_watcher "$CASE_DIR/watch2.out"
+  wait_for_exit "$CASE_PID" 60 >/dev/null 2>&1 || true
+  reap "$CASE_PID"
+  [ "$(inbox_count "$CASE_STATE" allowance-resume)" -eq 1 ] \
+    || fail "the same park was resumed more than once (found $(inbox_count "$CASE_STATE" allowance-resume) records)"
+  pass "a parked worker past its reset is resumed by a steering message, exactly once per park"
+}
+
+test_watcher_never_messages_a_worker_whose_allowance_is_still_spent() {
+  command -v jq >/dev/null 2>&1 \
+    || fail "jq is missing, so the provider gate could not be exercised - this is not a pass"
+  # Everything the resumable case has except the one thing that matters: the
+  # provider still reports the account exhausted. A message sent here is consumed
+  # for nothing and the worker parks again on the same turn.
+  build_resumable_case allowance-spent spent
+  launch_case_watcher "$CASE_DIR/watch.out"
+  wait_for_exit "$CASE_PID" 100 \
+    || { reap "$CASE_PID"; fail "the watcher never surfaced the park: $(cat "$CASE_OUT")"; }
+  grep -Fq "parked on the account allowance" "$CASE_OUT" \
+    || fail "the park was not surfaced at all, so this case did not reach the resume gate"
+  [ "$(inbox_count "$CASE_STATE" allowance-spent)" -eq 0 ] \
+    || fail "a worker whose allowance is still spent was messaged anyway"
+  [ ! -e "$CASE_STATE/.allowance-resumed-$CASE_KEY" ] \
+    || fail "a resume that never fired still recorded itself as spent for this episode"
+
+  # Silence proves nothing on its own - code that resumes no one is also silent.
+  # So the same fixture, the same worker and the same watcher are run again with
+  # ONLY the provider's answer changed, and the message has to appear. The
+  # provider gate is then the only difference between the two halves.
+  FM_STATE_OVERRIDE="$CASE_STATE" "$DRAIN" > "$CASE_DIR/drain2.out" 2> "$CASE_DIR/drain2.err" || true
+  ack_drain_err "$CASE_STATE" "$CASE_DIR/drain2.err" \
+    || fail "could not acknowledge the allowance wake before flipping the provider"
+  printf 'ready' > "$CASE_DIR/quota-verdict"
+  launch_case_watcher "$CASE_DIR/watch2.out"
+  wait_for_inbox "$CASE_STATE" allowance-spent 1 || true
+  reap "$CASE_PID"
+  [ "$(inbox_count "$CASE_STATE" allowance-spent)" -eq 1 ] \
+    || fail "the same worker was still not resumed once the provider reported headroom, so the silence above was not the provider gate"
+  pass "a parked worker whose allowance is still spent is not messaged at all, and is the moment it clears"
+}
+
+test_watcher_waits_for_the_recorded_reset_before_resuming() {
+  local now
+  command -v jq >/dev/null 2>&1 \
+    || fail "jq is missing, so the provider gate could not be exercised - this is not a pass"
+  # A park that has only just happened: its recorded reset is still an hour out.
+  # The provider is told to say "ready" precisely so this case cannot pass on the
+  # provider gate - the worker's own recorded reset is the only thing holding the
+  # message back.
+  now=$(date -u +%s)
+  build_parked_case allowance-early parked "$PARKED_PANE_LINE" "$(( now + 3600 ))" "$now"
+  printf 'ready' > "$CASE_DIR/quota-verdict"
+  install_fake_quota "$CASE_DIR/fakebin" "$CASE_DIR/quota-verdict"
+  launch_case_watcher "$CASE_DIR/watch.out"
+  wait_for_exit "$CASE_PID" 100 \
+    || { reap "$CASE_PID"; fail "the watcher never surfaced the fresh park: $(cat "$CASE_OUT")"; }
+  [ "$(inbox_count "$CASE_STATE" allowance-early)" -eq 0 ] \
+    || fail "a worker was messaged before the reset its own refusal record names"
+
+  # And again with ONLY the recorded reset moved into the past, so the silence
+  # above is attributable to that gate rather than to a resume path that never
+  # runs in this fixture at all.
+  FM_STATE_OVERRIDE="$CASE_STATE" "$DRAIN" > "$CASE_DIR/drain2.out" 2> "$CASE_DIR/drain2.err" || true
+  ack_drain_err "$CASE_STATE" "$CASE_DIR/drain2.err" \
+    || fail "could not acknowledge the allowance wake before moving the recorded reset"
+  make_store "$CASE_DIR/store" "$CASE_WT" parked "$(( now - 3600 ))" "$(( now - 7200 ))" >/dev/null
+  launch_case_watcher "$CASE_DIR/watch2.out"
+  wait_for_inbox "$CASE_STATE" allowance-early 1 || true
+  reap "$CASE_PID"
+  [ "$(inbox_count "$CASE_STATE" allowance-early)" -eq 1 ] \
+    || fail "the same worker was still not resumed once its recorded reset had passed, so the silence above was not the reset gate"
+  pass "a park is not messaged until the reset its own refusal record names has passed"
+}
+
 test_pane_signal_reads_the_rendered_notice
 test_pane_signal_is_bounded_to_the_prompt_region
 test_record_signal_is_current_state_not_history
+test_record_signal_stops_claiming_once_the_transcript_crossed_its_reset
 test_unsupported_harness_never_parks
 test_either_signal_alone_carries_the_verdict
 test_transcript_must_belong_to_this_worktree
 test_crew_state_reports_the_park_over_a_busy_verdict
 test_crew_state_leaves_an_unparked_crew_alone
+test_crew_state_stops_claiming_a_park_the_worker_has_worked_past
 test_watcher_surfaces_a_park_it_would_otherwise_call_healthy
 test_watcher_surfaces_a_park_from_the_transcript_alone
 test_watcher_leaves_an_ordinary_worker_alone
 test_watcher_surfaces_each_park_once
 test_watcher_surfaces_a_pane_only_park_once_across_relaunches
+test_watcher_resumes_a_parked_worker_whose_allowance_is_back
+test_watcher_never_messages_a_worker_whose_allowance_is_still_spent
+test_watcher_waits_for_the_recorded_reset_before_resuming

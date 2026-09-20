@@ -173,6 +173,12 @@ mkdir -p "$STATE"
 # worker mid-turn", and it can only ever ADD a wake (bin/fm-allowance-lib.sh).
 # shellcheck source=bin/fm-allowance-lib.sh
 . "$SCRIPT_DIR/fm-allowance-lib.sh"
+# Acting on that verdict: bin/fm-allowance-resume-lib.sh owns the two gates a
+# resume must clear and the message it sends. Detection and action stay separate
+# owners because the verdict is read on the cheap path for every worker, while
+# the action asks the provider a question and writes a steering record.
+# shellcheck source=bin/fm-allowance-resume-lib.sh
+. "$SCRIPT_DIR/fm-allowance-resume-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
@@ -1394,6 +1400,11 @@ surface_nonterminal_stale() {  # <window> <hash>
 # positive verdict, but a negative one there is inconclusive, not "not parked",
 # so it must not erase a marker a later, fuller check in the same cycle depends
 # on for de-duplication.
+#
+# The resume attempt below runs on EVERY poll the worker reads parked, not only
+# on the poll that surfaced it: the reset the resume waits for arrives long after
+# the wake did. Its own once-per-episode marker is what keeps that from becoming
+# a message per poll.
 allowance_park_check() {  # <window> <task> <key> <tail> <final>
   local win=$1 task=$2 key=$3 tail=$4 final=$5 marker detail reason harness wt meta
   meta="$STATE/$task.meta"
@@ -1405,14 +1416,58 @@ allowance_park_check() {  # <window> <task> <key> <tail> <final>
   harness=$(grep '^harness=' "$meta" | cut -d= -f2- || true)
   wt=$(grep '^worktree=' "$meta" | cut -d= -f2- || true)
   if ! detail=$(fm_allowance_park_detail "$harness" "$wt" "$tail"); then
-    [ "$final" = 1 ] && rm -f "$marker"
+    [ "$final" = 1 ] && rm -f "$marker" "$STATE/.allowance-resumed-$key"
     return 0
   fi
+  allowance_resume_attempt "$win" "$task" "$key" "$harness" "$wt" "$detail"
   [ "$(cat "$marker" 2>/dev/null || true)" != "$detail" ] || return 0
   printf '%s' "$detail" > "$marker"
-  reason="stale: $win (parked on the account allowance, ${detail%% *} signal: ${detail#* } - it resumes on a single Enter once the reset has passed)"
+  reason="stale: $win (parked on the account allowance, ${detail%% *} signal: ${detail#* } - supervision sends it a steering message of its own once the reset has passed and the provider reports headroom again; the ended turn left an empty composer, so a keystroke submits nothing)"
   fm_wake_append stale "$win" "$reason" || exit 1
   wake "$reason"
+}
+
+# Resume a parked worker once its allowance is actually back.
+#
+# bin/fm-allowance-resume-lib.sh owns both gates and the message; this supplies
+# the endpoint and the once-per-episode bookkeeping. A resume that fires is NOT a
+# wake: it is supervision fixing the thing it just reported it would fix, and the
+# park wake already told the reader to expect it.
+#
+# .allowance-resumed-<key> holds the notice this worker has already been resumed
+# for, so the episode identity is the same one .allowance-<key> de-duplicates the
+# wake on: a worker that parks again on a NEW notice is resumed again, and one
+# sitting through the same park is messaged exactly once. Both markers are
+# dropped together the moment the worker reads unparked.
+#
+# The record is written before it is rung, and the marker is set as soon as the
+# record exists, because the DURABLE RECORD is the delivery: an unrung or badly
+# rung record is re-rung by inbox_steer_check's ladder above, while a marker set
+# only on a successful ring would write a fresh record every poll until one rang.
+# A record that cannot be written at all is the one case worth surfacing, since
+# nothing else will retry it.
+allowance_resume_attempt() {  # <window> <task> <key> <harness> <worktree> <detail>
+  local win=$1 task=$2 key=$3 harness=$4 wt=$5 detail=$6
+  local marker notice provider rec reason
+  marker="$STATE/.allowance-resumed-$key"
+  notice=${detail#* }
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$notice" ] || return 0
+  provider=$(fm_allowance_resume_provider "$harness") || return 0
+  fm_allowance_reset_passed "$harness" "$wt" || return 0
+  [ "$(fm_allowance_quota_state "$STATE" "$provider")" = ready ] || return 0
+  if ! rec=$(fm_task_inbox_write "$STATE" "$task" "$(fm_allowance_resume_text)"); then
+    reason="stale: $win (parked on the account allowance and its reset has passed, but the steering record that would resume it could not be written under $STATE - resume it by hand and inspect the steering inbox)"
+    if [ "$(cat "$marker" 2>/dev/null || true)" != unwritable ]; then
+      printf '%s' unwritable > "$marker" 2>/dev/null || true
+      fm_wake_append stale "$win" "$reason" || exit 1
+      wake "$reason"
+    fi
+    return 0
+  fi
+  printf '%s' "$notice" > "$marker"
+  fm_task_inbox_ring "$(window_backend "$win")" "$win" "$rec" "$(window_label "$win")" >/dev/null 2>&1 || true
+  fm_task_inbox_record_ring "$STATE" "$task" "$rec" || true
+  triage_log "allowance resume sent: $task ${rec##*/} (${detail%% *} signal)"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
