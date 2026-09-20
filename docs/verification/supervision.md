@@ -465,7 +465,7 @@ Proven against fixture transcripts and panes only, by `tests/fm-allowance-park.t
 Not proven yet is that a real refusal in a live parked session still writes the fields the structural signal matches, and whether a live parked session receives the trailing metadata writes measured above.
 What would prove it is one real refusal captured end to end, which is the next occurrence of the outage.
 
-An armed capture records that occurrence outside the repository at `/home/dev/Documents/Dev/firstmate/data/fm-allowance-park-needs-a-resume/live-capture/`, polling every ten seconds against both live workers, and its `capture.sh` header documents each field.
+An armed capture records that occurrence in the operating home's per-task `data/` directory, outside version control, polling every ten seconds against the live workers, and its `capture.sh` header documents each field.
 For the next real refusal it records the refusal record verbatim with whatever timestamps it carries, the pane notice as rendered, every later write to the transcript with each record's type, and the arrival and count of steering records at the reset.
 On every poll it also records the verdict of this change's own functions against the real transcript and the real pane, from a copy of the library pinned at commit `b22a0701230f328454249738e189efbeccd5b179`.
 
