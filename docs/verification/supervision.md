@@ -367,9 +367,46 @@ Whether a LIVE parked session receives such writes while it sits at its limit pr
 The code therefore does not depend on a parked worker's file staying still: a metadata write never satisfies the bound, and only a record that carries a timestamp at or after the reset does.
 Its blind spot is the opposite one: a resumed worker whose only post-reset write is untimestamped metadata reads as still parked until its first timestamped record lands, which costs one stale report and, at most, one further steering message once the retry interval below has passed.
 
-The rendered arm is bounded by the same transcript.
-A pane has no clock, so a notice still near its prompt says nothing about when it was rendered; where the transcript has a refusal it has superseded, or that a later conversational record followed, the worker moved on and that notice is scrollback.
-The pane speaks only where the transcript is silent - absent, unlocatable, or never recording a refusal in a form the library reads - so a pane-only park stays visible.
+The rendered arm is bounded by the same transcript, and only for the episode the transcript has shown over.
+A pane has no clock, so a notice still near its prompt says nothing about when it was rendered.
+Where the transcript holds a refusal it has superseded, or that a later conversational record followed, and that refusal's own recorded reset is already past, a pane notice showing the same reset clock is that episode's scrollback and is not reported.
+A pane notice showing a different clock, or any notice where the refusal recorded no reset or its reset has not passed, is reported as before, because a worker that parked again through the pane-only affordance the transcript never records leaves the pane as the only evidence there is.
+The pane's newest reset clock is the one compared, so an old notice left above a fresh one cannot stand in for it.
+
+Suppressing the pane whenever the transcript holds any resolved refusal would delete it instead of bounding it, and this is how much of the store that would delete it for, measured on 2026-09-20 from the repository root with the library's own helpers:
+
+```sh
+. bin/fm-allowance-lib.sh
+anywhere=0 tail_refusal=0 resumed=0 suppressible=0
+now=$(date -u +%s)
+for f in ~/.claude/projects/*/*.jsonl; do
+  grep -aq '"apiErrorStatus":429' "$f" && anywhere=$((anywhere + 1))
+  if _fm_allowance_record_parked "$f" >/dev/null 2>&1; then
+    tail_refusal=$((tail_refusal + 1))
+  elif over=$(_fm_allowance_record_resumed "$f"); then
+    tail_refusal=$((tail_refusal + 1))
+    resumed=$((resumed + 1))
+    reset=${over%%|*}
+    case "$reset" in ''|*[!0-9]*) continue ;; esac
+    [ "$reset" -le "$now" ] && _fm_allowance_reset_clock "${over#*|}" >/dev/null && suppressible=$((suppressible + 1))
+  fi
+done
+echo "transcripts with a refusal record anywhere in the file:              $anywhere"
+echo "transcripts with a refusal inside the last $FM_ALLOWANCE_RECORD_TAIL_LINES lines:                 $tail_refusal"
+echo "  of those, the refusal was followed by a later turn (resolved):     $resumed"
+echo "  of those, a recorded past reset and a reset clock to compare:      $suppressible"
+# transcripts with a refusal record anywhere in the file:              105
+# transcripts with a refusal inside the last 200 lines:                 58
+#   of those, the refusal was followed by a later turn (resolved):     18
+#   of those, a recorded past reset and a reset clock to compare:      18
+```
+
+The denominator matters, because two counts of this store disagree through counting different things.
+The 105 counts every transcript holding a refusal record anywhere in the file, which includes refusals so old they have scrolled out of the last 200 lines the library reads, and those cannot affect the pane arm at all.
+The predicate the pane arm acts on is decided over the last 200 lines only, so its denominator is the 58 transcripts with a refusal inside that tail, and 18 of those 58 hold a refusal a later turn followed.
+A rule that shut the pane out whenever such a refusal was in view would therefore have removed the pane arm for those 18 workers whatever their pane showed, including a worker that parked again through the affordance the transcript never records.
+The rule above removes it for such a worker only when the pane's newest reset clock is the one the resolved refusal named, which is a claim about one notice and not about the worker.
+tests/fm-allowance-park.test.sh holds the shape that separates the two: a refusal, forty further turns so it is still inside the tail, and then a fresh park the transcript does not record.
 
 ### Resuming the park
 

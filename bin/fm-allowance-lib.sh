@@ -60,11 +60,23 @@
 # and the command). Whether a LIVE parked session receives them is unmeasured, so
 # nothing here relies on a parked worker's file staying still.
 #
-# The two arms are not equals when the transcript has something to say. A
+# The two arms are not equals about a refusal the transcript says is over. A
 # refusal in its tail that has been superseded, or that later conversation
-# followed, means the worker moved on, and a notice still rendered in the pane is
-# scrollback. The pane speaks only where the transcript is silent: absent,
-# unlocatable, or never recording a refusal in a form this library reads.
+# followed, is an episode the worker already left, and the pane may not reassert
+# THAT episode: a notice still rendered near the prompt after a resume is
+# scrollback. What the pane may not do is claim a park the transcript has already
+# ruled out; it may still report a different one. So the pane is suppressed only
+# when both hold - the over refusal's own recorded reset is already past, and the
+# reset clock in the pane's newest notice is the same clock that refusal named.
+# Either failing leaves the pane free to speak, because the cost of that is one
+# labelled notification and the cost of the opposite is a worker that parked again
+# through the pane-only affordance the transcript never records and sits stopped.
+# "Either signal alone carries a positive verdict" therefore excludes exactly one
+# thing: a pane notice the transcript's own over refusal accounts for. A refusal
+# with no recorded reset (Claude Code 2.1.226 and 2.1.227) can never be shown
+# over, so its pane notice is not suppressed. docs/verification/supervision.md
+# holds the measurement that separates this from suppressing the pane whenever a
+# resolved refusal is in view.
 #
 # Callers: bin/fm-watch.sh (surfaces the park as a named wake instead of letting
 # it wait out a wedge timer, and resumes it through bin/fm-allowance-resume-lib.sh
@@ -216,21 +228,76 @@ _fm_allowance_record_parked() {  # <file>
   '
 }
 
-# _fm_allowance_record_resumed: 0 when the tail of a session transcript holds a
-# provider refusal that a later conversational record followed - the worker took a
-# turn after being refused. Read beside the verdict above, it separates "the
-# transcript says the worker moved on" from "the transcript says nothing".
+# _fm_allowance_record_resumed: the last provider refusal in the tail of a session
+# transcript that a later conversational record followed - the worker took a turn
+# after being refused - as "<reset-epoch>|<notice>", the reset empty when the build
+# recorded none. Fails when the tail holds no such refusal.
 _fm_allowance_record_resumed() {  # <file>
   local f=${1:-}
   [ -f "$f" ] || return 1
   tail -n "$FM_ALLOWANCE_RECORD_TAIL_LINES" "$f" 2>/dev/null | awk '
     /"type"[ ]*:[ ]*"(user|assistant)"/ {
       refused = ($0 ~ /"isApiErrorMessage"[ ]*:[ ]*true/ && $0 ~ /"apiErrorStatus"[ ]*:[ ]*429/)
-      if (refused) seen = 1
+      if (refused) {
+        seen = 1
+        reset = ""
+        notice = ""
+        if (match($0, /"resetsAt"[ ]*:[ ]*[0-9]+/)) {
+          reset = substr($0, RSTART, RLENGTH)
+          sub(/^"resetsAt"[ ]*:[ ]*/, "", reset)
+        }
+        if (match($0, /"text"[ ]*:[ ]*"[^"]*"/)) {
+          notice = substr($0, RSTART, RLENGTH)
+          sub(/^"text"[ ]*:[ ]*"/, "", notice)
+          sub(/"$/, "", notice)
+        }
+      }
       last = refused
     }
-    END { exit !(seen && !last) }
+    END {
+      if (!seen || last) exit 1
+      print reset "|" notice
+    }
   '
+}
+
+# _fm_allowance_reset_clock: the reset clock a notice renders ("resets 8:30am
+# (UTC)"), which is the one part of the text that differs between windows. It is
+# read to the closing parenthesis and not to a separator, for the same reason the
+# pane signature does not match one. Prints nothing when there is none.
+_fm_allowance_reset_clock() {  # <text>
+  local re='resets [^)]*\)'
+  [[ ${1:-} =~ $re ]] || return 1
+  printf '%s' "${BASH_REMATCH[0]}"
+}
+
+# _fm_allowance_pane_clock: consume a pane capture on stdin; print the reset clock
+# of the NEWEST notice in its tail, so an old notice left above a fresh one cannot
+# stand in for it.
+_fm_allowance_pane_clock() {
+  local text
+  text=$(grep -v '^[[:space:]]*$' | tail -n "$FM_ALLOWANCE_PANE_TAIL_LINES" \
+    | grep -aoE 'resets [^)]*\)' | tail -n 1) || return 1
+  [ -n "$text" ] || return 1
+  printf '%s' "$text"
+}
+
+# _fm_allowance_pane_is_over_episode: 0 when the pane's notice is one the
+# transcript has already shown over. <over> is "<reset-epoch>|<notice>" for a
+# refusal the worker moved past, empty when there is none. Both halves must hold
+# - the refusal's recorded reset is already past, and the pane's newest reset clock
+# is the clock that refusal named - and a missing reset or an unreadable clock on
+# either side means the pane is NOT shown to be the same episode.
+_fm_allowance_pane_is_over_episode() {  # <over> <pane-tail>
+  local over=${1:-} tail=${2-} reset notice clock now
+  [ -n "$over" ] || return 1
+  reset=${over%%|*}
+  notice=${over#*|}
+  case "$reset" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date -u +%s)
+  [ "$reset" -le "$now" ] || return 1
+  clock=$(_fm_allowance_reset_clock "$notice") || return 1
+  [ "$clock" = "$(printf '%s' "$tail" | _fm_allowance_pane_clock)" ]
 }
 
 # _fm_allowance_record_path: the transcript <harness> writes for <worktree>, for
@@ -375,25 +442,31 @@ _fm_allowance_record_superseded() {  # <file>
 # worker whose transcript firstmate cannot find is still detected from its pane,
 # and a harness that reworded its notice is still detected from its transcript.
 #
-# Where the transcript speaks, the pane does not get a vote against it. A refusal
-# it has superseded, or that later conversation followed, is a worker that moved
-# on; the notice still rendered near its prompt is scrollback, and asserting it
-# would report a resumed worker as parked. The pane arm runs only when the
-# transcript is silent, so a pane-only park - no transcript, or one that never
-# recorded the refusal - is exactly as visible as it was.
+# Where the transcript says a refusal is over, the pane does not get to reassert
+# that same refusal. One it has superseded, or that later conversation followed, is
+# an episode the worker left; the notice still rendered near its prompt is
+# scrollback, and asserting it would report a resumed worker as parked. But the
+# pane is only shut out of THAT episode. A worker that has since parked again
+# through a notice the transcript never recorded shows a different reset clock,
+# and is reported. A pane-only park - no transcript, or one that never recorded a
+# refusal - is exactly as visible as it was.
 fm_allowance_park_detail() {  # <harness> <worktree> [pane-tail]
-  local harness=${1:-} wt=${2:-} tail=${3-} detail record
+  local harness=${1:-} wt=${2:-} tail=${3-} detail record over=''
   fm_allowance_harness_verified "$harness" || return 1
   if record=$(_fm_allowance_record_path "$harness" "$wt"); then
     if detail=$(_fm_allowance_record_parked "$record"); then
-      _fm_allowance_record_superseded "$record" && return 1
-      printf 'session-record %s' "${detail:-provider refused the turn on the account allowance}"
-      return 0
+      if ! _fm_allowance_record_superseded "$record"; then
+        printf 'session-record %s' "${detail:-provider refused the turn on the account allowance}"
+        return 0
+      fi
+      over="$(_fm_allowance_record_reset "$record" || true)|$detail"
+    else
+      over=$(_fm_allowance_record_resumed "$record") || over=''
     fi
-    ! _fm_allowance_record_resumed "$record" || return 1
   fi
   [ -n "$tail" ] || return 1
   if detail=$(printf '%s' "$tail" | fm_allowance_pane_parked "$harness"); then
+    ! _fm_allowance_pane_is_over_episode "$over" "$tail" || return 1
     printf 'pane %s' "$detail"
     return 0
   fi
