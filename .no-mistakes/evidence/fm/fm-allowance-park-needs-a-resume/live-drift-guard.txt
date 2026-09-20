@@ -1,0 +1,11 @@
+ok - claude (2.1.278 (Claude Code)): store resolves at /home/dev/.claude/projects/-tmp-fm-allowance-drift-jsgZy3-wt-claude and a healthy worker is not read as parked
+# claude (2.1.278 (Claude Code)): 232 of 250 refusal records carry a machine-readable reset
+# codex: not installed, nothing to check
+# opencode (1.18.11): no verified signature, deliberately never parks
+# pi (0.84.3): no verified signature, deliberately never parks
+# grok: not installed, nothing to check
+# kimi: not installed, nothing to check
+# cursor: not installed, nothing to check
+# muse: not installed, nothing to check
+# refusal-record evidence is not exercised here; see docs/verification/supervision.md
+ok - every installed harness with a verified allowance signature was exercised

@@ -1,0 +1,5 @@
+last conversational record is the refusal: 40
+  of those, with a recorded reset:         40
+  file mtime at or after that reset:       6
+  newest record timestamp at or after it:  0
+anywhere=105 tail_refusal=58 resumed=18 suppressible=18

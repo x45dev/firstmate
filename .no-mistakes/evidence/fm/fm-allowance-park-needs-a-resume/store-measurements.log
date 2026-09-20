@@ -1,0 +1,7 @@
+== 429 counts
+253
+235
+== crossing
+refusal-terminated: 41; with reset: 41; mtime crossed: 6; timestamp crossed: 0
+== denominator
+anywhere=108 tail_refusal=61 resolved=20 suppressible=20

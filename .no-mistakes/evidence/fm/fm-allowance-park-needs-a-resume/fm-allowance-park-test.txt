@@ -1,0 +1,26 @@
+ok - the pane signal reads the rendered notice and leaves ordinary output alone
+ok - the pane signal is bounded to the tail, so quoted content cannot park a worker
+ok - the record signal reports the last conversational record, not any refusal in history
+ok - the record signal stops claiming a park once the transcript crossed its own recorded reset
+ok - the record signal is not defeated by a file touched past the reset with no turn in it
+ok - the pane arm is bounded by what the transcript says, and a pane-only park stays visible
+ok - the pane is shut out of a resolved episode only, so a fresh pane-only park stays visible
+ok - a harness with no verified signature never parks
+ok - either signal alone carries the verdict, and losing both clears it
+ok - a transcript is trusted only when it records this worktree
+ok - fm-crew-state.sh reports an allowance park as the crew's current state
+ok - fm-crew-state.sh leaves a crew that is not parked to the sources below
+ok - fm-crew-state.sh stops asserting an allowance park once the worker has taken a turn since the reset
+ok - a worker parked on the allowance is surfaced as a named wake despite reading as working
+ok - a park recorded only in the transcript still surfaces, with the source named
+ok - a worker that is not parked is untouched by the allowance check
+ok - a park surfaces once per episode rather than on every poll
+ok - a pane-only park surfaces once per episode instead of re-waking on every poll
+ok - a parked worker past its reset is resumed by a steering message, exactly once per park
+ok - a parked worker whose allowance is still spent is not messaged at all, and is the moment it clears
+ok - a park is not messaged until the reset its own refusal record names has passed
+/home/dev/.no-mistakes/worktrees/5480956096ee/01M2Z9JJ7RGWR2C8YJ0HVJ6Z8H/bin/fm-wake-lib.sh: trap: line 2: unexpected EOF while looking for matching `)'
+ok - a worker whose transcript moved past its reset is neither surfaced nor messaged, whatever its pane still shows
+ok - a resume that did not take is retried later, even when the park has no recorded reset to tell it apart
+ok - the same notice either side of a reset is two parks, and the second is resumed once its own reset has passed
+ok - a fresh pane-only park is surfaced even with an old resolved refusal in the transcript tail

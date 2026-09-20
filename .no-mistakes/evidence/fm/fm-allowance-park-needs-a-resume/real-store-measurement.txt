@@ -1,0 +1,10 @@
+$ grep -rah "\"apiErrorStatus\":429" ~/.claude/projects/ | wc -l
+250
+$ ... | grep -ac resetsAt
+232
+$ crossing-rate + denominator commands from docs/verification/supervision.md
+last conversational record is the refusal: 40
+  of those, with a recorded reset:         40
+  file mtime at or after that reset:       6
+  newest record timestamp at or after it:  0
+refusal anywhere: 105; in tail: 58; resolved: 18; suppressible: 18

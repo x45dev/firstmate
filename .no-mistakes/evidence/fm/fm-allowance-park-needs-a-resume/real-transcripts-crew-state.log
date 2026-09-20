@@ -1,0 +1,12 @@
+-- mtimecross1 (/home/dev/.claude/projects/-home-dev/5cc156c8-c40d-4718-be19-7e0c8d3e9ba8.jsonl)
+   lib parked?: yes  resumed?: no superseded?: no  mtime>=reset?: yes
+   crew-state: state: parked · source: allowance · You've hit your session limit · resets 6:50am (UTC) (session-record signal; the refused turn already ended, so it resumes on a steering message rather than a keystroke)
+-- mtimecross2 (/home/dev/.claude/projects/-home-dev/63db7574-e316-4b76-a782-ae0151d0dd75.jsonl)
+   lib parked?: yes  resumed?: no superseded?: no  mtime>=reset?: yes
+   crew-state: state: parked · source: allowance · You've hit your session limit · resets 6:50am (UTC) (session-record signal; the refused turn already ended, so it resumes on a steering message rather than a keystroke)
+-- resolved1 (/home/dev/.claude/projects/-home-dev-Documents-Dev-firstmate/8bf082fd-c2f2-4fd1-95d7-2265b791fdda.jsonl)
+   lib parked?: no  resumed?: yes superseded?: no  mtime>=reset?: no
+   crew-state: state: unknown · source: pane · harness state unavailable (unknown missing)
+-- resolved2 (/home/dev/.claude/projects/-home-dev--treehouse-agent-standards-40ef1a-2-agent-standards/f75c881d-9e8a-4d67-95a7-05d8e91c0b17.jsonl)
+   lib parked?: no  resumed?: yes superseded?: no  mtime>=reset?: no
+   crew-state: state: unknown · source: pane · harness state unavailable (unknown missing)
