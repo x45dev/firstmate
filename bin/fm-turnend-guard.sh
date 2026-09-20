@@ -73,8 +73,9 @@
 #      walk, and trusted only while that record is younger than $GRACE and no
 #      publisher this guard already deferred to has stayed live and unproven
 #      for $GRACE, so a walk that hangs rather than crashes cannot defer every
-#      later Stop forever, even when each Stop republishes a fresh record; a live OPEN generation claim in the state/.claude-autoarm-epoch
-#      ledger - fm_autoarm_claim_open - or a legacy build's lock-holding claim
+#      later Stop forever, even when each Stop republishes a fresh record; a
+#      live OPEN generation claim in the state/.claude-autoarm-epoch ledger -
+#      fm_autoarm_claim_open - or a legacy build's lock-holding claim
 #      under the legacy abandonment proof) or to record a fresh actionable exit-2
 #      outcome (state/.claude-autoarm-epoch) for this event epoch - either proof
 #      allows without consuming a continuation, so one event epoch yields exactly
