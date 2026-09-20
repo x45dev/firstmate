@@ -2073,6 +2073,55 @@ test_hook_claude_mode_claim_requires_live_matched_publisher() {
   pass "fm-turnend-guard --claude: an in-progress claim is trusted only while its publisher is alive and unchanged"
 }
 
+# The claim covers the auto-arm's ancestry walk, and that walk can HANG rather
+# than crash: `ps` forks per hop under a multi-hour harness timeout, leaving a
+# live, identity-matched publisher that never records its generation claim and
+# never releases the record. Liveness plus identity alone read that as recovery
+# under way on every later Stop, so nothing was ever armed - supervision
+# silently ceasing to exist (2026-08-17/18 incident class). Age is the bound
+# that ends it.
+test_hook_claude_mode_stale_claim_stops_counting() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-claim-staleness")
+  : > "$dir/state/task1.meta"
+
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    fm_test_stop "$pid"
+    fail "could not identify the live claim publisher"
+  }
+
+  # Control: the same live, identity-matched publisher inside the bound is
+  # still trusted, so the assertion below isolates age and nothing else.
+  printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$pid" "$identity" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-claim"
+  out=$(FM_GUARD_GRACE=300 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  [ "$status" -eq 0 ] || {
+    fm_test_stop "$pid"
+    expect_code 0 "$status" "a fresh live identity-matched claim must still be accepted"
+  }
+
+  # The hang: alive, identity intact, older than the grace.
+  printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$pid" "$identity" "$(( $(date +%s) - 1800 ))" \
+    > "$dir/state/.claude-autoarm-claim"
+  out=$(FM_GUARD_GRACE=300 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  [ "$status" -eq 2 ] || {
+    fm_test_stop "$pid"
+    expect_code 2 "$status" "a claim older than the grace must not stand in for recovery forever"
+  }
+  assert_contains "$out" "TURN WOULD END BLIND" "the stale-claim block lost its blind-turn banner"
+
+  # A record whose age cannot be read cannot be proven fresh, exactly as an
+  # identityless generation claim cannot.
+  printf 'pid=%s\nidentity=%s\n' "$pid" "$identity" \
+    > "$dir/state/.claude-autoarm-claim"
+  out=$(FM_GUARD_GRACE=300 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  fm_test_stop "$pid"
+  expect_code 2 "$status" "a claim with no readable start time must not stand in for recovery"
+  pass "fm-turnend-guard --claude: an in-progress claim stops counting once it outlives the guard grace"
+}
+
 # `arming` is the one epoch outcome that unambiguously means "arming right now",
 # and the incident's sixth occurrence blocked while it stood on disk.
 test_hook_claude_mode_dead_arming_epoch_blocks() {
@@ -2483,6 +2532,7 @@ test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_claude_mode_early_claim_is_the_whole_difference
 test_hook_claude_mode_claim_requires_live_matched_publisher
+test_hook_claude_mode_stale_claim_stops_counting
 test_hook_claude_mode_dead_arming_epoch_blocks
 test_hook_claude_mode_wait_is_bounded_by_elapsed_time
 test_hook_claude_mode_trailing_check_catches_claim_published_at_deadline

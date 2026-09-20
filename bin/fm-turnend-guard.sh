@@ -70,7 +70,9 @@
 #      ELAPSED time, not a pass count) for the auto-arm to claim this home (its
 #      in-progress claim state/.claude-autoarm-claim, published before its
 #      identity gate and the only proof that exists during that gate's ancestry
-#      walk; a live OPEN generation claim in the state/.claude-autoarm-epoch
+#      walk, and trusted only while that record is younger than $GRACE so a
+#      walk that hangs rather than crashes cannot defer every later Stop
+#      forever; a live OPEN generation claim in the state/.claude-autoarm-epoch
 #      ledger - fm_autoarm_claim_open - or a legacy build's lock-holding claim
 #      under the legacy abandonment proof) or to record a fresh actionable exit-2
 #      outcome (state/.claude-autoarm-epoch) for this event epoch - either proof
@@ -343,11 +345,38 @@ budget_account_current_epoch() {  # [observe|block]
 # publication ordering"). The recorded process identity is what makes liveness
 # trustworthy here: a killed hook leaves the record behind, and a bare pid check
 # would accept whatever unrelated process later reused that pid.
+#
+# Liveness alone is not enough, because the walk this claim covers can HANG
+# rather than crash: the hook forks `ps` per hop under a multi-hour harness
+# timeout, so a wedged hop leaves a live, identity-matched publisher that never
+# reaches its generation claim and never releases this record. Every later Stop
+# then read recovery as under way and armed nothing - supervision silently
+# ceasing to exist, the 2026-08-17/18 incident class. So the claim also carries
+# the ledger's stuck proof from fm_autoarm_claim_open in bin/fm-wake-lib.sh:
+# past $GRACE it stops counting and the Stop path arms instead of standing down
+# forever. Only the AGE half of that proof transfers. The ledger pairs it with a
+# stale beacon because a healthy arm legitimately holds "arming" for hours while
+# the watcher beats; this record has no such phase, since the hook releases it
+# the moment its generation claim is recorded, ahead of fm-watch-arm.sh. Keeping
+# the beacon half here would only weaken the bound it exists to impose.
+# $GRACE cannot false-positive on a genuine claim: the window it covers is
+# measured in seconds (0.11-0.29s to publish, 0.9-3.5s for the walk), so the
+# cost of the bound is one grace window of deferral on a hang, once, against a
+# hang that was otherwise permanent.
+# started_at is mandatory exactly as identity is: a record whose age cannot be
+# read cannot be proven fresh, and an unverifiable claim must not defer
+# (fm_autoarm_claim_open refuses an identityless entry for the same reason).
 autoarm_claim_in_progress() {
-  local pid identity current
+  local pid identity started current
   pid=$(sed -n '1s/^pid=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
   identity=$(sed -n '2s/^identity=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
+  started=$(sed -n '3s/^started_at=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
   [ -n "$identity" ] || return 1
+  case "$started" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  # Cheapest gate first: an expired claim is decided with no fork at all.
+  [ "$(( $(date +%s) - started ))" -lt "$GRACE" ] || return 1
   fm_pid_alive "$pid" || return 1
   current=$(fm_pid_identity "$pid" 2>/dev/null || true)
   [ -n "$current" ] && [ "$current" = "$identity" ]
