@@ -421,7 +421,7 @@ So [`bin/fm-allowance-resume-lib.sh`](../../bin/fm-allowance-resume-lib.sh) resu
 
 | Gate | Source | Why it is there |
 | --- | --- | --- |
-| The recorded reset has passed | the refusal record's own `resetsAt` | Local and free, and the only gate that can veto a resume the provider read would wrongly allow. Unknown for a pane-only park, which never blocks on its own. |
+| The recorded reset has passed by a `FM_ALLOWANCE_RESUME_GRACE_SECS` margin (120) | the refusal record's own `resetsAt` | Local and free, and the only gate that can veto a resume the provider read would wrongly allow. Unknown for a pane-only park, which never blocks on its own. |
 | The provider reports headroom | `quota-axi --json`, `quotaSemantics.effectiveAvailability` | The authority. A message sent into an allowance that is still spent is consumed for nothing and the worker parks again on the same turn, so no positive evidence means no resume. |
 
 A known scope reporting `runway.status` of `exhausted_now`, or zero remaining, is spent; a known scope with headroom and no spent sibling is ready; a missing, incompatible, timed-out or malformed read is unknown, which is not headroom.
