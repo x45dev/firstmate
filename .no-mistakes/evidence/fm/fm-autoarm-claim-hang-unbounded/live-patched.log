@@ -1,0 +1,11 @@
+t=+1s stop#1 claim[pid=3127998 started_at=1789903621 ] guard_exit=0 episode=present
+t=+3s stop#2 claim[pid=3128449 started_at=1789903623 ] guard_exit=0 episode=present
+t=+4s stop#3 claim[pid=3128849 started_at=1789903625 ] guard_exit=0 episode=present
+t=+7s stop#4 claim[pid=3129144 started_at=1789903626 ] guard_exit=2 episode=present
+t=+10s stop#5 claim[pid=3129984 started_at=1789903629 ] guard_exit=2 episode=present
+t=+12s stop#6 claim[pid=3130973 started_at=1789903632 ] guard_exit=2 episode=present
+t=+15s stop#7 claim[pid=3131985 started_at=1789903634 ] guard_exit=2 episode=present
+t=+18s stop#8 claim[pid=3132837 started_at=1789903637 ] guard_exit=2 episode=present
+t=+21s stop#9 claim[pid=3133701 started_at=1789903640 ] guard_exit=2 episode=present
+t=+24s stop#10 claim[pid=3134669 started_at=1789903643 ] guard_exit=2 episode=present
+TURN WOULD END BLIND

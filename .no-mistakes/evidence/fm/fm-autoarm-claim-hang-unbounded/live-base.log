@@ -1,0 +1,10 @@
+t=+1s stop#1 claim[pid=3141431 started_at=1789903656 ] guard_exit=0 episode=absent
+t=+2s stop#2 claim[pid=3142234 started_at=1789903658 ] guard_exit=0 episode=absent
+t=+4s stop#3 claim[pid=3143309 started_at=1789903659 ] guard_exit=0 episode=absent
+t=+6s stop#4 claim[pid=3144196 started_at=1789903661 ] guard_exit=0 episode=absent
+t=+8s stop#5 claim[pid=3145264 started_at=1789903663 ] guard_exit=0 episode=absent
+t=+9s stop#6 claim[pid=3146424 started_at=1789903665 ] guard_exit=0 episode=absent
+t=+11s stop#7 claim[pid=3147382 started_at=1789903666 ] guard_exit=0 episode=absent
+t=+13s stop#8 claim[pid=3148097 started_at=1789903668 ] guard_exit=0 episode=absent
+t=+14s stop#9 claim[pid=3148526 started_at=1789903670 ] guard_exit=0 episode=absent
+t=+16s stop#10 claim[pid=3148904 started_at=1789903671 ] guard_exit=0 episode=absent
