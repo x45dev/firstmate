@@ -75,6 +75,14 @@ FM_ALLOWANCE_QUOTA_TIMEOUT=${FM_ALLOWANCE_QUOTA_TIMEOUT:-20}
 # from landing on the wrong side of it and spending a message for nothing.
 FM_ALLOWANCE_RESUME_GRACE_SECS=${FM_ALLOWANCE_RESUME_GRACE_SECS:-120}
 
+# How long a resume that did not take is left alone before it may be sent again.
+# A worker refused a second time on the same notice is still parked, so nothing
+# ever reads it as unparked and clears the record of the first attempt; without
+# an age on that record the first attempt would be the last, and a worker whose
+# provider read ran ahead of the real reset would sit stopped past it. The gates
+# above still have to pass again, so a retry is never sent into a spent allowance.
+FM_ALLOWANCE_RESUME_RETRY_SECS=${FM_ALLOWANCE_RESUME_RETRY_SECS:-1800}
+
 # fm_allowance_resume_provider: the quota-axi provider id behind <harness>.
 # Gated exactly like the park signature it pairs with: an adapter that never
 # parks has no provider mapping here and can never be resumed by accident.

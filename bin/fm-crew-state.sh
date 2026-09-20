@@ -30,7 +30,7 @@
 #      every source below, which would otherwise describe a worker waiting at its
 #      limit prompt as still working. Reported as parked with the cause, and only
 #      while that library still reads the verdict as current: it stops claiming a
-#      park once the worker's transcript has moved past its own reset clock.
+#      park once the worker's transcript holds a turn written after its own reset.
 #   3. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
@@ -276,8 +276,8 @@ crew_busy_verdict() {  # <target>
 # ever knowing it.
 #
 # The verdict is bounded in time by its own owner: a refusal record stops being
-# read as current state once the worker's transcript has been written at or after
-# the reset the notice names. Without that bound this section went on reporting
+# read as current state once the worker's transcript holds a record written at or
+# after the reset the notice names, and a notice left on the pane cannot revive it. Without that bound this section went on reporting
 # `parked - source: allowance` for a worker that had been resumed and was visibly
 # working, which is the same "every source reads quiet" failure in the other
 # direction - and a stale assertion here is worse than none, because every

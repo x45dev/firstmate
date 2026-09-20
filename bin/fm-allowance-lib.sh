@@ -41,14 +41,30 @@
 # would buy a false wedge alarm, which is the one thing this must not add.
 #
 # The refusal record also carries the reset it is waiting on, as an absolute
-# epoch second, and that is what bounds the verdict in time. A refusal record is
-# evidence about the moment it was written; without a bound it goes on asserting
-# "parked" for as long as the transcript holds it, which is what left
-# bin/fm-crew-state.sh reporting a resumed, visibly working worker as parked long
-# after its reset. So the structural arm stops claiming anything once the
-# worker's own transcript has been written at or after that recorded reset: a
-# still-parked worker writes nothing more, so a transcript that crossed its own
-# reset is a worker that took a turn.
+# epoch second, and that is what a park episode is identified and bounded by. The
+# notice text recurs byte for byte every window ("resets 8:30am (UTC)"), so it
+# cannot tell this park from the next; the reset instant can, and
+# fm_allowance_record_reset_epoch is where every caller reads it. The verdict is
+# bounded in time by the same field: a refusal record is evidence about the moment
+# it was written, and without a bound it went on asserting "parked" long after the
+# worker had been resumed, which is what left bin/fm-crew-state.sh reporting a
+# visibly working worker as parked. So the structural arm stops claiming anything
+# once the newest record in the transcript that carries its own timestamp is at or
+# after that recorded reset.
+#
+# The bound reads record timestamps and not the file's mtime, because the file is
+# written for reasons other than a turn: session metadata (last-prompt, cost-state,
+# file-history-snapshot, bridge-session) is appended with no timestamp, and a
+# measured share of refusal-terminated transcripts were touched after their own
+# reset by writes of that kind (docs/verification/supervision.md holds the count
+# and the command). Whether a LIVE parked session receives them is unmeasured, so
+# nothing here relies on a parked worker's file staying still.
+#
+# The two arms are not equals when the transcript has something to say. A
+# refusal in its tail that has been superseded, or that later conversation
+# followed, means the worker moved on, and a notice still rendered in the pane is
+# scrollback. The pane speaks only where the transcript is silent: absent,
+# unlocatable, or never recording a refusal in a form this library reads.
 #
 # Callers: bin/fm-watch.sh (surfaces the park as a named wake instead of letting
 # it wait out a wedge timer, and resumes it through bin/fm-allowance-resume-lib.sh
@@ -200,9 +216,26 @@ _fm_allowance_record_parked() {  # <file>
   '
 }
 
+# _fm_allowance_record_resumed: 0 when the tail of a session transcript holds a
+# provider refusal that a later conversational record followed - the worker took a
+# turn after being refused. Read beside the verdict above, it separates "the
+# transcript says the worker moved on" from "the transcript says nothing".
+_fm_allowance_record_resumed() {  # <file>
+  local f=${1:-}
+  [ -f "$f" ] || return 1
+  tail -n "$FM_ALLOWANCE_RECORD_TAIL_LINES" "$f" 2>/dev/null | awk '
+    /"type"[ ]*:[ ]*"(user|assistant)"/ {
+      refused = ($0 ~ /"isApiErrorMessage"[ ]*:[ ]*true/ && $0 ~ /"apiErrorStatus"[ ]*:[ ]*429/)
+      if (refused) seen = 1
+      last = refused
+    }
+    END { exit !(seen && !last) }
+  '
+}
+
 # _fm_allowance_record_path: the transcript <harness> writes for <worktree>, for
-# the adapters whose store firstmate can locate. Split out from the verdict below
-# because the time bound has to stat the same file the verdict read.
+# the adapters whose store firstmate can locate. Split out from the verdicts below
+# because the refusal, its reset and the time bound must all read the same file.
 _fm_allowance_record_path() {  # <harness> <worktree>
   case "${1:-}" in
     claude*) _fm_allowance_claude_record "${2:-}" ;;
@@ -267,6 +300,19 @@ fm_allowance_record_reset_epoch() {  # <harness> <worktree>
   printf '%s' "$reset"
 }
 
+# _fm_allowance_epoch_iso: <epoch> as a UTC "YYYY-MM-DDTHH:MM:SS", the leading
+# 19 characters of the timestamps a transcript records, so the two compare as
+# strings without parsing either. BSD date takes -r, GNU date takes -d @<epoch>,
+# and on Linux `date -r` names a FILE, so the two are selected by platform rather
+# than chained.
+_fm_allowance_epoch_iso() {  # <epoch>
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    /bin/date -u -r "${1:-0}" +%Y-%m-%dT%H:%M:%S 2>/dev/null
+  else
+    date -u -d "@${1:-0}" +%Y-%m-%dT%H:%M:%S 2>/dev/null
+  fi
+}
+
 # _fm_allowance_mtime: epoch seconds of a file's mtime, portably. BSD stat takes
 # `-f`, GNU stat takes `-c`, and on Linux `stat -f` is filesystem stat and prints
 # a partial dump before failing, so the two forms are selected by platform rather
@@ -279,28 +325,41 @@ _fm_allowance_mtime() {  # <file>
   fi
 }
 
-# fm_allowance_record_superseded: 0 when the refusal record is HISTORY rather
-# than current state - the worker's own transcript has been written at or after
-# the reset that same record names, which only a worker that took a turn can do.
+# _fm_allowance_record_written: the timestamp of the newest conversational or
+# system record in the transcript tail, as its leading "YYYY-MM-DDTHH:MM:SS".
+# Records with no timestamp of their own - the session metadata appended around a
+# shutdown - are not a turn and are skipped.
+_fm_allowance_record_written() {  # <file>
+  local f=${1:-} stamp
+  [ -f "$f" ] || return 1
+  stamp=$(tail -n "$FM_ALLOWANCE_RECORD_TAIL_LINES" "$f" 2>/dev/null | awk '
+    /"type"[ ]*:[ ]*"(user|assistant|system)"/ {
+      if (match($0, /"timestamp"[ ]*:[ ]*"[^"]*"/)) {
+        stamp = substr($0, RSTART, RLENGTH)
+        sub(/^"timestamp"[ ]*:[ ]*"/, "", stamp)
+        sub(/"$/, "", stamp)
+      }
+    }
+    END { if (stamp == "") exit 1; print substr(stamp, 1, 19) }
+  ') || return 1
+  printf '%s' "$stamp"
+}
+
+# _fm_allowance_record_superseded: 0 when the refusal record in <file> is HISTORY
+# rather than current state - the worker's own transcript has a record written at
+# or after the reset that same refusal names, which only a worker that took a turn
+# can produce. A worker still sitting at its limit prompt has no new turn, and the
+# refusal record itself is written while its own reset is still in the future, so
+# a fresh park can never satisfy the bound.
 #
-# This is the time bound the header describes, and it is a conjunction of two
-# things the vendor writes independently: the absolute reset inside the refusal
-# record, and the mtime of the file the harness appends to. A worker still
-# sitting at its limit prompt writes nothing more, so its transcript cannot cross
-# its own reset however long it sits there; a resumed worker crosses it on its
-# first turn. Neither half is a rendered string, and neither can be satisfied by
-# the refusal record itself, which is written while its own reset is still in the
-# future.
-#
-# A build that recorded no reset has no bound and reports 1 - not superseded -
-# so the verdict there is exactly what it was before this bound existed.
-fm_allowance_record_superseded() {  # <harness> <worktree>
-  local harness=${1:-} wt=${2:-} reset record mtime
-  reset=$(fm_allowance_record_reset_epoch "$harness" "$wt") || return 1
-  record=$(_fm_allowance_record_path "$harness" "$wt") || return 1
-  mtime=$(_fm_allowance_mtime "$record") || return 1
-  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$mtime" -ge "$reset" ]
+# A build that recorded no reset has no bound and reports 1 - not superseded - so
+# the verdict there is exactly what it was before this bound existed.
+_fm_allowance_record_superseded() {  # <file>
+  local f=${1:-} reset written
+  reset=$(_fm_allowance_record_reset "$f") || return 1
+  case "$reset" in ''|*[!0-9]*) return 1 ;; esac
+  written=$(_fm_allowance_record_written "$f") || return 1
+  ! [[ "$written" < "$(_fm_allowance_epoch_iso "$reset")" ]]
 }
 
 # fm_allowance_park_detail: the single entry point. Prints "<source> <detail>" and
@@ -316,19 +375,22 @@ fm_allowance_record_superseded() {  # <harness> <worktree>
 # worker whose transcript firstmate cannot find is still detected from its pane,
 # and a harness that reworded its notice is still detected from its transcript.
 #
-# A structural verdict the time bound reports superseded is dropped rather than
-# returned, and the pane arm is still consulted below it: the transcript has
-# moved past its own reset, so it is no longer evidence about now, while a pane
-# still rendering the notice is. That is the whole of the fix for a worker being
-# reported parked while it is visibly working.
+# Where the transcript speaks, the pane does not get a vote against it. A refusal
+# it has superseded, or that later conversation followed, is a worker that moved
+# on; the notice still rendered near its prompt is scrollback, and asserting it
+# would report a resumed worker as parked. The pane arm runs only when the
+# transcript is silent, so a pane-only park - no transcript, or one that never
+# recorded the refusal - is exactly as visible as it was.
 fm_allowance_park_detail() {  # <harness> <worktree> [pane-tail]
-  local harness=${1:-} wt=${2:-} tail=${3-} detail
+  local harness=${1:-} wt=${2:-} tail=${3-} detail record
   fm_allowance_harness_verified "$harness" || return 1
-  if detail=$(fm_allowance_record_parked "$harness" "$wt"); then
-    if ! fm_allowance_record_superseded "$harness" "$wt"; then
+  if record=$(_fm_allowance_record_path "$harness" "$wt"); then
+    if detail=$(_fm_allowance_record_parked "$record"); then
+      _fm_allowance_record_superseded "$record" && return 1
       printf 'session-record %s' "${detail:-provider refused the turn on the account allowance}"
       return 0
     fi
+    ! _fm_allowance_record_resumed "$record" || return 1
   fi
   [ -n "$tail" ] || return 1
   if detail=$(printf '%s' "$tail" | fm_allowance_pane_parked "$harness"); then

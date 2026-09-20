@@ -307,8 +307,69 @@ grep -rah '"apiErrorStatus":429' ~/.claude/projects/ | grep -ac '"resetsAt"[ ]*:
 The 13 without one are a `"quotaLimits":null` written by Claude Code 2.1.226 and 2.1.227; every newer build records `{"status":"rejected","resetsAt":<epoch>,"rateLimitType":"five_hour"|"seven_day"}`.
 An absent reset is therefore read as no bound, never as zero, so a build that records none keeps exactly the pre-bound behaviour.
 
-`fm_allowance_record_superseded` requires the transcript's mtime to have reached that reset.
-A worker still sitting at its limit prompt writes nothing more, so its transcript cannot cross its own reset however long it sits there; a resumed worker crosses it on its first turn; and the refusal record itself is written while its own reset is still in the future, so a fresh park can never satisfy the bound.
+The reset is what identifies a park episode, because the notice text is byte-identical every window and cannot tell one park from the next.
+`bin/fm-watch.sh` keys its once-per-episode wake and its resume record on the recorded reset together with the notice, so a worker refused again on the same notice but a new reset is a new episode, surfaced and resumed on its own terms.
+
+The same field bounds the verdict in time.
+The structural arm stops claiming a park once the newest `user`, `assistant` or `system` record in the transcript tail that carries its own `timestamp` is at or after the recorded reset.
+A worker still sitting at its limit prompt has taken no turn, and the refusal record itself is written while its own reset is still in the future, so a fresh park can never satisfy the bound; a resumed worker satisfies it on its first turn.
+
+The bound reads record timestamps rather than the file's mtime because a refusal-terminated transcript is written to for reasons that are not a turn.
+Measured over the local store on 2026-09-20, from the repository root, with the library's own helpers:
+
+```sh
+. bin/fm-allowance-lib.sh
+refused=0 reset=0 mtime_cross=0 stamp_cross=0
+for f in ~/.claude/projects/*/*.jsonl; do
+  _fm_allowance_record_parked "$f" >/dev/null 2>&1 || continue
+  refused=$((refused + 1))
+  r=$(_fm_allowance_record_reset "$f" 2>/dev/null) || continue
+  reset=$((reset + 1))
+  [ "$(_fm_allowance_mtime "$f")" -ge "$r" ] && mtime_cross=$((mtime_cross + 1))
+  _fm_allowance_record_superseded "$f" && stamp_cross=$((stamp_cross + 1))
+done
+echo "last conversational record is the refusal: $refused"
+echo "  of those, with a recorded reset:         $reset"
+echo "  file mtime at or after that reset:       $mtime_cross"
+echo "  newest record timestamp at or after it:  $stamp_cross"
+# last conversational record is the refusal: 40
+#   of those, with a recorded reset:         40
+#   file mtime at or after that reset:       6
+#   newest record timestamp at or after it:  0
+```
+
+So a still-parked worker's transcript CAN cross its own reset by file mtime: 6 of the 40 refusal-terminated transcripts did, and an mtime bound would have read all six as resumed.
+The records written after the refusal in those six are all non-conversational session metadata:
+
+```sh
+. bin/fm-allowance-lib.sh
+for f in ~/.claude/projects/*/*.jsonl; do
+  _fm_allowance_record_parked "$f" >/dev/null 2>&1 || continue
+  r=$(_fm_allowance_record_reset "$f" 2>/dev/null) || continue
+  [ "$(_fm_allowance_mtime "$f")" -ge "$r" ] || continue
+  tail -n "$FM_ALLOWANCE_RECORD_TAIL_LINES" "$f" | sed -n '/"apiErrorStatus":429/,$p' | tail -n +2 \
+    | grep -ao '^{"type":"[a-z-]*"' | sed 's/^{"type":"//; s/"$//' | sort -u
+done | sort | uniq -c | sort -rn
+#       6 last-prompt
+#       4 bridge-session
+#       3 file-history-snapshot
+#       1 queue-operation
+#       1 pr-link
+#       1 permission-mode
+#       1 mode
+#       1 cost-state
+#       1 atis-latch
+#       1 ai-title
+```
+
+None of them is a turn, none carries a timestamp of its own that the bound reads, and the `cost-state` records look like shutdown writes.
+Whether a LIVE parked session receives such writes while it sits at its limit prompt is unmeasured: every transcript above is a finished session, so this measures what the store holds and not what a running worker does.
+The code therefore does not depend on a parked worker's file staying still: a metadata write never satisfies the bound, and only a record that carries a timestamp at or after the reset does.
+Its blind spot is the opposite one: a resumed worker whose only post-reset write is untimestamped metadata reads as still parked until its first timestamped record lands, which costs one stale report and, at most, one further steering message once the retry interval below has passed.
+
+The rendered arm is bounded by the same transcript.
+A pane has no clock, so a notice still near its prompt says nothing about when it was rendered; where the transcript has a refusal it has superseded, or that a later conversational record followed, the worker moved on and that notice is scrollback.
+The pane speaks only where the transcript is silent - absent, unlocatable, or never recording a refusal in a form the library reads - so a pane-only park stays visible.
 
 ### Resuming the park
 
@@ -326,7 +387,8 @@ So [`bin/fm-allowance-resume-lib.sh`](../../bin/fm-allowance-resume-lib.sh) resu
 
 A known scope reporting `runway.status` of `exhausted_now`, or zero remaining, is spent; a known scope with headroom and no spent sibling is ready; a missing, incompatible, timed-out or malformed read is unknown, which is not headroom.
 The read is cached per home for `FM_ALLOWANCE_QUOTA_TTL` seconds so a fleet of parked workers costs one subprocess rather than one each.
-The resume fires once per park episode per worker, keyed on the same notice the wake de-duplicates on.
+The resume fires once per park episode per worker, keyed on the same recorded reset and notice the wake de-duplicates on.
+A resume that did not take leaves the worker parked and refused again on an identical notice, so nothing reads it as unparked and clears the record of the attempt; that record ages out after `FM_ALLOWANCE_RESUME_RETRY_SECS` (1800), after which both gates are asked again and the worker is retried.
 
 Deterministic entry point:
 

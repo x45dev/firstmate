@@ -1389,8 +1389,11 @@ surface_nonterminal_stale() {  # <window> <hash>
 # otherwise: the structural transcript signal needs no pane at all, which is what
 # lets an idle-by-design secondmate be checked without reading its pane.
 #
-# .allowance-<key> remembers the detail already surfaced, so a worker sitting at
-# its limit prompt cannot re-wake firstmate every poll. It is dropped the moment
+# .allowance-<key> remembers the episode and detail already surfaced, so a worker
+# sitting at its limit prompt cannot re-wake firstmate every poll. The episode is
+# the reset the refusal record names (bin/fm-allowance-lib.sh), because the notice
+# text is byte-identical every window: a worker that parks again on the NEXT reset
+# is a new episode and surfaces again. It is dropped the moment
 # the worker is no longer parked, so a later park surfaces again - but only on a
 # call that saw every signal available for this window this cycle. <final>=1
 # marks that call: either it carries the settled pane tail, or the caller knows
@@ -1406,7 +1409,7 @@ surface_nonterminal_stale() {  # <window> <hash>
 # the wake did. Its own once-per-episode marker is what keeps that from becoming
 # a message per poll.
 allowance_park_check() {  # <window> <task> <key> <tail> <final>
-  local win=$1 task=$2 key=$3 tail=$4 final=$5 marker detail reason harness wt meta
+  local win=$1 task=$2 key=$3 tail=$4 final=$5 marker detail reason harness wt meta episode
   meta="$STATE/$task.meta"
   marker="$STATE/.allowance-$key"
   [ -n "$task" ] && [ -f "$meta" ] || return 0
@@ -1419,9 +1422,10 @@ allowance_park_check() {  # <window> <task> <key> <tail> <final>
     [ "$final" = 1 ] && rm -f "$marker" "$STATE/.allowance-resumed-$key"
     return 0
   fi
-  allowance_resume_attempt "$win" "$task" "$key" "$harness" "$wt" "$detail"
-  [ "$(cat "$marker" 2>/dev/null || true)" != "$detail" ] || return 0
-  printf '%s' "$detail" > "$marker"
+  episode=$(fm_allowance_record_reset_epoch "$harness" "$wt" 2>/dev/null) || episode=unrecorded
+  allowance_resume_attempt "$win" "$task" "$key" "$harness" "$wt" "$detail" "$episode"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$episode $detail" ] || return 0
+  printf '%s' "$episode $detail" > "$marker"
   reason="stale: $win (parked on the account allowance, ${detail%% *} signal: ${detail#* } - supervision sends it a steering message of its own once the reset has passed and the provider reports headroom again; the ended turn left an empty composer, so a keystroke submits nothing)"
   fm_wake_append stale "$win" "$reason" || exit 1
   wake "$reason"
@@ -1434,11 +1438,15 @@ allowance_park_check() {  # <window> <task> <key> <tail> <final>
 # wake: it is supervision fixing the thing it just reported it would fix, and the
 # park wake already told the reader to expect it.
 #
-# .allowance-resumed-<key> holds the notice this worker has already been resumed
-# for, so the episode identity is the same one .allowance-<key> de-duplicates the
-# wake on: a worker that parks again on a NEW notice is resumed again, and one
-# sitting through the same park is messaged exactly once. Both markers are
-# dropped together the moment the worker reads unparked.
+# .allowance-resumed-<key> holds the episode and notice this worker has already
+# been resumed for, the same identity .allowance-<key> de-duplicates the wake on:
+# a worker that parks again on a NEW reset or notice is resumed again, and one
+# sitting through the same park is messaged once. Both markers are dropped
+# together the moment the worker reads unparked. A worker refused again on an
+# identical notice never reads unparked, and an episode with no recorded reset has
+# nothing else to tell it apart, so the marker also ages out: once
+# FM_ALLOWANCE_RESUME_RETRY_SECS have passed since the last send, the gates are
+# asked again and a resume that did not take is retried rather than stranded.
 #
 # The record is written before it is rung, and the marker is set as soon as the
 # record exists, because the DURABLE RECORD is the delivery: an unrung or badly
@@ -1446,12 +1454,15 @@ allowance_park_check() {  # <window> <task> <key> <tail> <final>
 # only on a successful ring would write a fresh record every poll until one rang.
 # A record that cannot be written at all is the one case worth surfacing, since
 # nothing else will retry it.
-allowance_resume_attempt() {  # <window> <task> <key> <harness> <worktree> <detail>
-  local win=$1 task=$2 key=$3 harness=$4 wt=$5 detail=$6
-  local marker notice provider rec reason
+allowance_resume_attempt() {  # <window> <task> <key> <harness> <worktree> <detail> <episode>
+  local win=$1 task=$2 key=$3 harness=$4 wt=$5 detail=$6 episode=$7
+  local marker identity provider rec reason
   marker="$STATE/.allowance-resumed-$key"
-  notice=${detail#* }
-  [ "$(cat "$marker" 2>/dev/null || true)" != "$notice" ] || return 0
+  identity="$episode ${detail#* }"
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$identity" ] \
+    && [ "$(age_of "$marker")" -lt "$FM_ALLOWANCE_RESUME_RETRY_SECS" ]; then
+    return 0
+  fi
   provider=$(fm_allowance_resume_provider "$harness") || return 0
   fm_allowance_reset_passed "$harness" "$wt" || return 0
   [ "$(fm_allowance_quota_state "$STATE" "$provider")" = ready ] || return 0
@@ -1464,7 +1475,7 @@ allowance_resume_attempt() {  # <window> <task> <key> <harness> <worktree> <deta
     fi
     return 0
   fi
-  printf '%s' "$notice" > "$marker"
+  printf '%s' "$identity" > "$marker"
   fm_task_inbox_ring "$(window_backend "$win")" "$win" "$rec" "$(window_label "$win")" >/dev/null 2>&1 || true
   fm_task_inbox_record_ring "$STATE" "$task" "$rec" || true
   triage_log "allowance resume sent: $task ${rec##*/} (${detail%% *} signal)"
