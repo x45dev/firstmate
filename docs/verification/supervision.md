@@ -444,6 +444,35 @@ FM_ALLOWANCE_PARK_DRIFT=1 tests/fm-allowance-park-live-e2e.test.sh
 That guard proves the store derivation still lands where the harness writes and that a healthy worker is not classified as parked.
 It deliberately does not prove that a real refusal still writes the matched fields, because forcing one means exhausting the account allowance, which is the outage this detection exists to shorten; that half is refreshed by capturing the next real refusal against the counts above.
 
+### What the resume has and has not been proven against
+
+Two of the eight scenarios the change claims were driven live against the product, and the other six are instrumented for a real event and unconfirmed until it arrives.
+Those six need a real account-allowance refusal in a live session, and a refusal cannot be provoked without causing the outage this change exists to shorten, so no fixture is dressed up as a live verdict here.
+
+Proven live, by the commands in this section:
+
+- The store measurements above reproduce over the real `~/.claude/projects` store, by the crossing-rate and denominator commands recorded beside those claims.
+- A healthy worker on the installed Claude Code is not read as parked and its session store resolves, by `FM_ALLOWANCE_PARK_DRIFT=1 tests/fm-allowance-park-live-e2e.test.sh`.
+
+Proven against fixture transcripts and panes only, by `tests/fm-allowance-park.test.sh`, which stubs `quota-axi`:
+
+- A parked worker is resumed by a steering message exactly once, only after its reset has passed and `quota-axi` reports headroom.
+- A resume that did not take is retried after the true reset, including when the same notice text recurs.
+- `fm-crew-state.sh` stops reporting a park once the worker has worked past its reset, and still reports a real park.
+- A fresh pane-only park is still surfaced when an old resolved refusal sits in the last 200 transcript lines.
+- A worker whose transcript moved past its reset is neither surfaced nor messaged, whatever its pane still shows.
+
+Not proven yet is that a real refusal in a live parked session still writes the fields the structural signal matches, and whether a live parked session receives the trailing metadata writes measured above.
+What would prove it is one real refusal captured end to end, which is the next occurrence of the outage.
+
+An armed capture records that occurrence outside the repository at `/home/dev/Documents/Dev/firstmate/data/fm-allowance-park-needs-a-resume/live-capture/`, polling every ten seconds against both live workers, and its `capture.sh` header documents each field.
+For the next real refusal it records the refusal record verbatim with whatever timestamps it carries, the pane notice as rendered, every later write to the transcript with each record's type, and the arrival and count of steering records at the reset.
+On every poll it also records the verdict of this change's own functions against the real transcript and the real pane, from a copy of the library pinned at commit `b22a0701230f328454249738e189efbeccd5b179`.
+
+The watcher deployed in the operating home does not carry this change, so what the capture records at the reset is what the UNFIXED fleet does.
+That confirms the defect and does not validate the resume.
+The pinned-library verdicts are what speak to the detection and gating half of the fix, and the resume itself stays unconfirmed against a real park until a watcher carrying this change runs through one.
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-05, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
