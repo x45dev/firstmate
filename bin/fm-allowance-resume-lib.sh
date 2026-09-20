@@ -21,6 +21,10 @@
 # first ring does not land is re-rung and eventually escalated by machinery that
 # already exists, rather than by a retry loop invented here.
 #
+# The resume runs inside the watcher's own poll (bin/fm-watch.sh), so it can only
+# help while supervision is polling: when the watcher is not running, or is not
+# the build that carries this, nothing resumes a parked worker.
+#
 # Two gates, and the resume fires only when both are satisfied:
 #
 #   recorded reset  The absolute reset the refusal record itself carries

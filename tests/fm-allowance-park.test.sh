@@ -87,10 +87,15 @@ iso_of() {  # <epoch>
 # itself (parked), an ordinary reply that landed after it (resumed), several dozen
 # turns of work after it (worked - the refusal is long resolved but still inside
 # the tail the library reads), or an ordinary reply with no refusal anywhere
-# (ordinary - a transcript that is silent about the allowance). The refusal record carries the vendor's own
-# machine-readable error fields; the trailing non-conversational records are there
-# because a real transcript has them, and the fold must skip them rather than
-# stop at them.
+# (ordinary - a transcript that is silent about the allowance). The refusal record
+# carries the vendor's own machine-readable error fields, and its shape is
+# MEASURED, not assumed: it is the record Claude Code 2.1.278 wrote for a real
+# account-allowance refusal on 2026-09-20 (isApiErrorMessage, apiErrorStatus 429,
+# error rate_limit, model "<synthetic>", stop_reason "stop_sequence", zero usage
+# counters, a quotaLimits object with status rejected and the absolute resetsAt).
+# Only the notice's clock text and the reset epoch are varied by the cases below.
+# The trailing non-conversational records are there because a real transcript has
+# them, and the fold must skip them rather than stop at them.
 #
 # <reset-epoch> is the absolute reset the vendor records beside those fields,
 # defaulting to an hour out - the shape of a park that has only just happened,
@@ -110,14 +115,14 @@ write_transcript() {  # <file> <cwd> <mode> [reset-epoch|none] [written-epoch]
     quota='"quotaLimits":null'
     refused_at=$(iso_of "$(( $(date -u +%s) - 3600 ))")
   else
-    quota=$(printf '"quotaLimits":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour"}' "$reset")
+    quota=$(printf '"quotaLimits":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour","unifiedRateLimitFallbackAvailable":false,"overageStatus":"rejected","isUsingOverage":false}' "$reset")
     refused_at=$(iso_of "$(( reset - 3600 ))")
   fi
   {
     printf '{"type":"user","cwd":"%s","timestamp":"%s","message":{"role":"user","content":"go"}}\n' "$cwd" "$refused_at"
     printf '{"type":"assistant","cwd":"%s","timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}\n' "$cwd" "$refused_at"
     if [ "$mode" != ordinary ]; then
-      printf '{"type":"assistant","cwd":"%s","timestamp":"%s","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You'"'"'ve hit your session limit · resets 8:30am (UTC)"}]},%s,"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}\n' "$cwd" "$refused_at" "$quota"
+      printf '{"type":"assistant","cwd":"%s","timestamp":"%s","message":{"role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence","stop_sequence":"","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"You'"'"'ve hit your session limit · resets 8:30am (UTC)"}]},%s,"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429}\n' "$cwd" "$refused_at" "$quota"
     fi
     if [ "$mode" = resumed ]; then
       printf '{"type":"assistant","cwd":"%s","timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"resumed after the reset"}]}}\n' "$cwd" "$(iso_of "$(date -u +%s)")"

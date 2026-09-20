@@ -57,8 +57,9 @@
 # file-history-snapshot, bridge-session) is appended with no timestamp, and a
 # measured share of refusal-terminated transcripts were touched after their own
 # reset by writes of that kind (docs/verification/supervision.md holds the count
-# and the command). Whether a LIVE parked session receives them is unmeasured, so
-# nothing here relies on a parked worker's file staying still.
+# and the command). One live park (Claude Code 2.1.278, 2026-09-20) took none of
+# them across its reset, but that is one park, so nothing here relies on a parked
+# worker's file staying still.
 #
 # The two arms are not equals about a refusal the transcript says is over. A
 # refusal in its tail that has been superseded, or that later conversation
