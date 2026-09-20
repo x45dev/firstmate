@@ -39,13 +39,13 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
-#                          worktree was written during the quiet window is
-#                          deferred rather than escalated (wedge_defer_writing),
-#                          because files appearing there are liveness the pane and
-#                          the run step cannot show; that deferral still
-#                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          resume. Unless afk is active. A pane that shows
+#                          measurable forward progress during the quiet window is
+#                          deferred rather than escalated (wedge_defer owns the
+#                          admitted evidence), because progress the pane and the
+#                          run step cannot show is still progress; that deferral
+#                          still re-surfaces once per PAUSE_RESURFACE_SECS, and a
+#                          pane that proves nothing keeps the unchanged schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -162,6 +162,12 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Positive movement evidence. The busy contract above answers "did the harness
+# say a turn is open"; this answers "did anything actually move since the last
+# look", which is the only thing that separates a live worker on a long quiet
+# step from a dead one whose marker was never cleared (bin/fm-progress-lib.sh).
+# shellcheck source=bin/fm-progress-lib.sh
+. "$SCRIPT_DIR/fm-progress-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -294,6 +300,11 @@ case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=
 # invisibly - except an item held for the captain while the away-posture record
 # exists, which is never rechecked (afk_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# How far the anchor that cadence is measured from may appear to move between two
+# re-surfaces before it is recorded as having moved rather than as clock noise.
+# Instrumentation only; see resurface_audit.
+FM_RESURFACE_ANCHOR_TOLERANCE_SECS=${FM_RESURFACE_ANCHOR_TOLERANCE_SECS:-5}
+case "$FM_RESURFACE_ANCHOR_TOLERANCE_SECS" in ''|*[!0-9]*) FM_RESURFACE_ANCHOR_TOLERANCE_SECS=5 ;; esac
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
@@ -343,6 +354,20 @@ hash_pane() {
 # treated as not-provably-working and surfaces rather than being absorbed.
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
+#
+# A busy verdict is then held to positive movement evidence. Every semantic
+# source records that a turn OPENED; none of them can record that the process
+# died mid-turn, so a marker left behind by an agent that exited is byte-for-byte
+# indistinguishable from one a live worker is still inside. That is not a
+# theoretical gap: on 2026-09-09 a task read "working, harness busy (claude-hook)"
+# for four and a half hours after its agent had already gone, holding uncommitted
+# work and an unreadable steering message the whole time. So where the sample
+# pair in bin/fm-progress-lib.sh says nothing moved across two observations -
+# not the turn timer, not the token counter, not the rendered content - the busy
+# claim is refused and the pane surfaces for inspection. Only a measured `still`
+# refuses it: `unknown` (one sample, an unreadable surface, no counters rendered)
+# keeps the pre-existing behavior exactly, because absence of measurement is the
+# inference this whole path exists to stop making.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
@@ -353,7 +378,9 @@ window_is_busy() {  # <window> <tail40>
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
-  [ "${verdict%% *}" = busy ]
+  [ "${verdict%% *}" = busy ] || return 1
+  [ -n "$task" ] || return 0
+  [ "$(fm_progress_verdict "$STATE" "$task")" != still ]
 }
 
 window_kind() {
@@ -878,6 +905,40 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
 # declared `until` time that has just passed re-surface at once), while the
 # throttle keeps the cadence between repeats.
+# Instrumentation, NOT behaviour: record what a re-surface was anchored on, and
+# say so loudly when the next one is anchored somewhere earlier.
+#
+# 2026-09-11 recorded one declared wait re-surfacing twice about sixty seconds
+# apart, reporting an age of 3607s and then 3605s. An age that goes DOWN across
+# a forward gap means the anchor this cadence measures from moved - which one
+# actor reading one status file cannot do, so either something rewrote that
+# anchor or a second actor fired against an anchor of its own. Neither could be
+# established from the surviving records: the triage log keeps only absorbs, and
+# both tasks had been cleaned up by the time it was read. Rather than ship a fix
+# for a cause nothing has proven, this captures the next occurrence with the one
+# fact that separates those two explanations.
+#
+# Costs one small read and one small write per FIRED re-surface, which is at most
+# once per PAUSE_RESURFACE_SECS per window, and never runs on an absorbed poll.
+resurface_audit() {  # <throttle-marker> <age>
+  local marker=$1 age=$2 audit prev now prev_age prev_ts moved
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  audit="$marker.anchor"
+  now=$(date +%s)
+  prev=$(cat "$audit" 2>/dev/null || true)
+  printf 'age=%s ts=%s\n' "$age" "$now" > "$audit" 2>/dev/null || return 0
+  case "$prev" in 'age='*' ts='*) ;; *) return 0 ;; esac
+  prev_age=${prev#age=}; prev_age=${prev_age%% *}
+  prev_ts=${prev#*ts=}; prev_ts=${prev_ts%%[!0-9]*}
+  case "$prev_age" in ''|*[!0-9]*) return 0 ;; esac
+  case "$prev_ts" in ''|*[!0-9]*) return 0 ;; esac
+  # What this age would be had the anchor stayed put: the previous age plus the
+  # time that has passed since it was reported. Anything less means it advanced.
+  moved=$(( prev_age + now - prev_ts - age ))
+  [ "$moved" -gt "$FM_RESURFACE_ANCHOR_TOLERANCE_SECS" ] || return 0
+  triage_log "resurface anchor moved (the 2026-09-11 repeat-fire tell; capture this): $marker reported ${prev_age}s at $prev_ts and ${age}s at $now, so its anchor advanced ${moved}s"
+}
+
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
@@ -886,34 +947,54 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
+  resurface_audit "$throttle" "$age"
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
   wake "$reason"
 }
 
-# Defer ONE wedge escalation for a pane that went quiet while its own task
-# worktree is demonstrably still being written (crew_worktree_written_since in
-# fm-classify-lib.sh). The pane and the run step both say nothing is happening;
-# the worktree says otherwise, and files appearing in it is the harder signal to
-# fake, so the escalation is deferred rather than fired. Deliberately a DEFERRAL,
-# not a cancellation: the idle timer restarts, so the next window probes again,
-# and a .writing-since-<key> marker ages the whole deferral chain so the pane
-# still re-surfaces once every PAUSE_RESURFACE_SECS through the shared
-# resurface_absorbed above - literally the same bounded cadence a declared pause
-# uses, throttled by its own .writing-resurfaced-<key> marker - and a crew whose
-# worktree churns without real progress cannot stay invisible. The escalation
-# counter is left alone: it is neither advanced (this is not an escalation) nor
-# reset (a later genuine escalation must still carry the demand-deep-inspection
-# history it had already earned).
-wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
+# Defer ONE wedge escalation for a pane that went quiet while something OTHER
+# than the pane proves the crew is still moving forward. The pane and the run
+# step both say nothing is happening; the deferral evidence says otherwise, and
+# every source admitted here is harder to fake than a rendered footer:
+#
+#   worktree   files appearing in the crew's own task worktree
+#              (crew_worktree_written_since in fm-classify-lib.sh)
+#   movement   the token counter or the rendered content moved between two
+#              samples (bin/fm-progress-lib.sh); a turn timer ticking on its own
+#              is deliberately NOT admitted, because a hung foreground call
+#              ticks exactly the same way
+#   pipeline   the validation run reports recent activity on the step it is
+#              executing (crew_wedge_class in fm-classify-lib.sh), which is the
+#              only thing separating a run waiting on a remote service from a
+#              wedged one
+#
+# A crew whose work is COMPLETE does not appear here: that is not a deferral but
+# a suppression, because a finished crew's idle pane is the outcome and a timer
+# has nothing left to measure. wedge_timer_check handles it before this call.
+#
+# Deliberately a DEFERRAL, not a cancellation: the idle timer restarts, so the
+# next window probes again, and a .writing-since-<key> marker ages the whole
+# deferral chain so the pane still re-surfaces once every PAUSE_RESURFACE_SECS
+# through the shared resurface_absorbed above - literally the same bounded
+# cadence a declared pause uses, throttled by its own .writing-resurfaced-<key>
+# marker - and a crew that churns without real progress cannot stay invisible.
+# One chain serves every evidence source, so a crew cannot earn a second
+# re-surface window by producing a second kind of proof. The markers keep their
+# original names because live homes hold them on disk under those names.
+#
+# The escalation counter is left alone: it is neither advanced (this is not an
+# escalation) nor reset (a later genuine escalation must still carry the
+# demand-deep-inspection history it had already earned).
+wedge_defer() {  # <window> <since-file> <triage-label> <idle-age> <evidence> <detail>
+  local win=$1 since_file=$2 label=$3 age=$4 evidence=$5 detail=$6 key wsf wage
   key=$(window_key "$win")
   wsf="$STATE/.writing-since-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
-  triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
+    "stale: $win (idle ${age}s, $detail for ${wage}s, rechecked on a long cadence not a wedge; confirm the progress is real)"
+  triage_log "absorbed $label ($evidence since the idle window opened, idle ${age}s): $win"
 }
 
 # Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
@@ -921,7 +1002,8 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 # long-finished one cannot make the next deferral resurface immediately.
 clear_write_tracking() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" \
+    "$STATE/.writing-resurfaced-$key.anchor"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -932,11 +1014,12 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# Every deferral probe runs ONLY here, inside the at-threshold branch that is
+# about to escalate: at most one bounded worktree walk and one bounded pipeline
+# read per window per STALE_ESCALATE_SECS, never per poll. The movement verdict
+# costs nothing extra - the poll that captured the pane already recorded it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason wedge_class
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -949,8 +1032,34 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # One crew-state read answers both of this chain's authoritative
+        # questions; see crew_wedge_class for why they share it.
+        wedge_class=$(crew_wedge_class "$task")
+        if [ "$wedge_class" = complete ]; then
+          # Not a deferral: a finished crew is never a wedge, so this timer has
+          # nothing left to measure and the escalation is suppressed outright
+          # rather than rechecked on a long cadence. The anchor is re-taken so
+          # the bound restarts from the moment the crew stops reading complete,
+          # which is the first moment stillness means anything again.
+          date +%s > "$since_file"
+          rm -f "$escalation_file"
+          clear_write_tracking "$(window_key "$win")"
+          triage_log "absorbed $label (crew reports its work complete; the idle pane IS the completion): $win"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          wedge_defer "$win" "$since_file" "$label" "$age" \
+            "worktree written" "writing its worktree"
+          return 0
+        fi
+        if [ "$(fm_progress_verdict "$STATE" "$task")" = advanced ]; then
+          wedge_defer "$win" "$since_file" "$label" "$age" \
+            "rendered progress measured" "showing measurable progress"
+          return 0
+        fi
+        if [ "$wedge_class" = run-active ]; then
+          wedge_defer "$win" "$since_file" "$label" "$age" \
+            "validation run reports recent step activity" "running an active validation step"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -1105,9 +1214,47 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   return 1
 }
 
+# 0 when <window>'s recorded endpoint is authoritatively GONE, in which case the
+# window's whole stale bookkeeping is dropped and this poll is finished with it.
+#
+# A worker stopped through the control plane leaves its metadata behind, so its
+# window stays in the recorded inventory with nothing on the other end of it.
+# Every question the stale path can ask about such a window is a question about
+# a pane that does not exist, and the answers it invents are alarms: on
+# 2026-09-07 a task whose pane herdr answered `pane_not_found` for was escalated
+# twice after it had been stopped. Nothing read from a pane can fix that, so the
+# escalation has to stop here, at the recorded-window check, before the pane is
+# read at all.
+#
+# Only positive absence counts. fm_backend_agent_state's `missing` means the
+# backend inventoried its endpoints and this one is not among them; every
+# ambiguous, unreadable, or unverified answer leaves the window exactly where it
+# was, because a backend that failed to answer under load is not a retirement.
+# The probe runs ONLY where a capture already came back empty or failed, so a
+# healthy window pays nothing for it.
+#
+# Clearing the markers matters as much as skipping the poll: a window reused by
+# a later spawn must not inherit a dead predecessor's wedge timer, escalation
+# count, or re-surface throttle.
+endpoint_retired() {  # <window> <window-key>
+  local w=$1 key=$2
+  case "$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || true)" in
+    missing) ;;
+    *) return 1 ;;
+  esac
+  if [ -e "$STATE/.stale-$key" ] || [ -e "$STATE/.stale-since-$key" ] \
+    || [ -e "$STATE/.paused-$key" ] || [ -e "$STATE/.hash-$key" ]; then
+    triage_log "absorbed stale (recorded endpoint is gone; nothing left to inspect on this pane): $w"
+  fi
+  clear_pause_tracking "$key"
+  rm -f "$STATE/.hash-$key" "$STATE/.count-$key"
+  return 0
+}
+
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" \
+    "$STATE/.paused-resurfaced-$key" "$STATE/.paused-resurfaced-$key.anchor"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -1281,6 +1428,29 @@ captain_call_stale_bound() {  # <window-key> <task>
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# The same scope for a crew that declared its work COMPLETE. Carried under its
+# own prefix so a completion window and a captain-call window can never read
+# each other's marker as their own, and empty for every other terminal verb:
+# a failure, a blocker, and an open decision each leave something unresolved and
+# must keep alarming on every new hash exactly as they do today.
+stale_completion_declaration() {  # <task> <last-status-line>
+  status_is_completion "$2" || return 1
+  printf 'completion:%s' "$(stale_wait_declaration "$1")"
+}
+
+# 0 when a completion has ALREADY been surfaced for this window inside the
+# current re-surface cadence. A finished crew's pane keeps churning its hash on
+# a clock or a context counter, and every new hash re-enters the terminal path
+# carrying the same unchanged `done:` line - which is how one green PR reported
+# itself to firstmate over and over (2026-08-24). The first sight is the report
+# and still alarms; a later hash saying the same thing has nothing to add.
+# A pure read, so the caller records the throttle only after its wake landed.
+stale_completion_bound() {  # <window-key> <task> <last-status-line>
+  local declaration
+  declaration=$(stale_completion_declaration "$2" "$3") || return 1
+  stale_wait_throttled "$1" "$declaration"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -2420,7 +2590,18 @@ EOF
     if [ "$mate_skips_pane" -eq 1 ]; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      endpoint_retired "$w" "$key" || true
+      continue
+    fi
+    if [ -z "$tail40" ] && endpoint_retired "$w" "$key"; then
+      continue
+    fi
+    # The ONE movement sample of this window this poll, taken by the caller that
+    # already holds the capture. Every other reader in the cycle takes the pure
+    # fm_progress_verdict read, so one pair of observations answers the whole
+    # cycle and a second look can never re-anchor the pair (bin/fm-progress-lib.sh).
+    [ -z "$task" ] || fm_progress_observe "$STATE" "$task" "$tail40" >/dev/null
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -2484,6 +2665,11 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
+            elif stale_completion_bound "$key" "$task" "$last"; then
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (completion already surfaced for this status; a new hash on a finished crew adds nothing): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
               # the captain already holds this work: further NEW pane hashes with
@@ -2497,6 +2683,14 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
+              # captain_call_stale_bound left the scope this alarm is recorded
+              # against, and its call identity is the more specific of the two.
+              # Only where it found no open call does a completion bind its own
+              # window, so the next hash carrying this same line is absorbed
+              # above instead of reporting the finished work a second time.
+              if [ -z "$STALE_WAIT_DECLARATION" ]; then
+                STALE_WAIT_DECLARATION=$(stale_completion_declaration "$task" "$last") || STALE_WAIT_DECLARATION=
+              fi
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
