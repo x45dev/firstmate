@@ -238,6 +238,69 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## Wedge evidence
+
+A pane that renders nothing new is the only evidence the wedge bound ever had, and it cannot tell a hung foreground call from a live worker on a long quiet step.
+[`bin/fm-progress-lib.sh`](../../bin/fm-progress-lib.sh) is the single owner of the movement verdict that separates them, and [`bin/fm-watch.sh`](../../bin/fm-watch.sh) consults it, the validation run's own step-activity recency, and the crew's completion state before escalating a possible wedge.
+
+The verdict reads three counters across two samples and either of the two progress counters alone carries an `advanced`, so no single vendor string is load-bearing:
+
+| Counter | Source | What it carries |
+| --- | --- | --- |
+| `footer` | a digest of the last `FM_PROGRESS_FOOTER_LINES` non-blank lines | liveness only; it models no notation, so a footer this release cannot parse degrades to `alive` and never to `still` |
+| `tokens` | a progress counter read out of that footer | forward progress, where the notation is one the library recognises |
+| `content` | a digest of the rendered body above the footer | forward progress, for a harness whose footer is frozen |
+
+`still` is the only verdict that admits a wedge, and it is reached only when all three counters are readable and none of them moved.
+An unreadable surface answers `unknown`, which licenses nothing in either direction.
+
+Verified deterministically on 2026-09-20:
+
+```sh
+tests/fm-progress-lib.test.sh
+tests/fm-watch-triage.test.sh
+tests/fm-crew-state.test.sh
+```
+
+```text
+ok - an unchanged pane reports still - the only verdict that admits a wedge
+ok - a ticking turn timer alone reports alive: proof of life, not of progress
+ok - an analysis pass counting 39 -> 60 reports advanced past the one-hour bound
+ok - a surface rendering no counter reports unknown: stillness is observed, never inferred
+ok - a clock-form timer and a footer notation nothing models both read as movement
+ok - a worker whose rendered output advances is not wedge-escalated, while one whose only moving part is its clock still is
+ok - a validation run reporting recent step activity is not wedge-escalated, while one reporting a quiet step still is
+ok - a crew holding a green PR is not wedge-escalated, while a failed one on the same idle pane still is
+ok - a completion is reported once per status and then bounded, while a blocker in the same shape keeps alarming
+ok - a retired endpoint stops at the recorded-window check, while a live window whose capture came back empty keeps its bookkeeping
+ok - a busy marker over a pane that moves nothing across two samples is not reported working, while a moving one still is
+ok - one declared wait rechecks exactly once per window across eight polls and a churning pane hash
+ok - a working run carries its own step-activity recency, and a run with no active step never reads as recent
+```
+
+The three suites reported 14, 78, and 87 passing assertions with no failures on that run.
+
+The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in both directions - a running turn must not read `still`, and a settled pane must.
+That guard has not yet been run against a live harness, so no dated per-harness result is claimed; its entry is owed in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence") and it is the command that establishes one.
+
+### The declared-wait repeat, unconfirmed
+
+On 2026-09-11 one declared wait re-surfaced twice about sixty seconds apart, reporting an age of 3607s and then 3605s.
+An age that falls across a gap that only moves forward means the anchor the recheck cadence measures from advanced, which one actor reading one status file cannot do.
+Two explanations fit: something rewrote that anchor, or a second actor fired against an anchor of its own.
+
+Neither could be established at this HEAD on 2026-09-20.
+Two controlled reproductions - the dead-agent paused path through `handle_paused_stale`, and the live-parked path through `surface_nonterminal_stale` with an alternating pane hash - each held the once-per-window contract, and `escalate_add` in [`bin/fm-supervise-daemon.sh`](../../bin/fm-supervise-daemon.sh) advances its own marker once per window as well.
+The triage log keeps only absorbed sightings, and both tasks had been cleaned up before the records were read.
+
+Both reproductions are now regressions pinning that contract, and `resurface_audit` records what each FIRED recheck was anchored on, so the next occurrence names which of the two explanations it was:
+
+```text
+resurface anchor moved (the 2026-09-11 repeat-fire tell; capture this): <marker> reported <n>s at <ts> and <n>s at <ts>, so its anchor advanced <n>s
+```
+
+No fix is claimed for this half.
+
 ## Allowance-park detection
 
 A worker whose provider refused the turn on the account allowance keeps a live process, a live endpoint, and a normally rendered pane, so every liveness probe above reads it as healthy.

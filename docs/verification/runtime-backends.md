@@ -405,6 +405,17 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+## Rendered movement evidence
+
+[`bin/fm-progress-lib.sh`](../../bin/fm-progress-lib.sh) decides whether a quiet pane holds a live worker or a process that has stopped, and it decides it from what the harness vendor renders.
+`FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` is the guard that proves that verdict against every installed harness, in both directions: two samples taken while a real turn runs must not read `still`, and two samples of the same pane once it has settled must.
+
+No dated per-harness result is recorded yet: the guard shipped with the change that introduced the library and has not been run against a live harness.
+Until it has, this guarantee rests on the portable regressions in `tests/fm-progress-lib.test.sh` and `tests/fm-watch-triage.test.sh`, recorded under [Wedge evidence](supervision.md#wedge-evidence).
+
+The liveness counter models no harness's notation, so a footer this release cannot parse degrades to `alive` rather than to `still`, and a harness whose footer the progress counter does not recognise is a `# ... reads 'alive'` note in that guard's output, not a failure.
+The two failures it exists to catch are named in its output: `MOVEMENT BLIND` for a running turn read as `still`, and `MOVEMENT INERT` for a settled pane that never is.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
