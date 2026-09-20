@@ -192,7 +192,7 @@ check_harness_movement() {  # <name>
   verdict=$(sample_verdict "$win" "$name-working")
   if [ "$verdict" = still ]; then
     FAILED=1
-    printf 'not ok - MOVEMENT BLIND: %s (%s) rendered a running turn that read `still` across %ss, which is the verdict that admits a wedge. Teach bin/fm-progress-lib.sh the footer this release renders.\n' \
+    printf 'not ok - MOVEMENT BLIND: %s (%s) rendered a running turn that read "still" across %ss, which is the verdict that admits a wedge. Teach bin/fm-progress-lib.sh the footer this release renders.\n' \
       "$name" "$version" "$GAP" >&2
     capture_pane "$win" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
@@ -210,7 +210,7 @@ check_harness_movement() {  # <name>
   verdict=$(sample_verdict "$win" "$name-settled")
   if [ "$verdict" != still ]; then
     FAILED=1
-    printf 'not ok - MOVEMENT INERT: %s (%s) rendered a settled pane that read `%s`, not `still`, so nothing on this harness would ever be admitted as a possible wedge. Something in its idle rendering moves; bin/fm-progress-lib.sh must stop counting it as movement.\n' \
+    printf 'not ok - MOVEMENT INERT: %s (%s) rendered a settled pane that read "%s", not "still", so nothing on this harness would ever be admitted as a possible wedge. Something in its idle rendering moves; bin/fm-progress-lib.sh must stop counting it as movement.\n' \
       "$name" "$version" "$verdict" >&2
     capture_pane "$win" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
