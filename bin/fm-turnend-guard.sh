@@ -70,9 +70,10 @@
 #      ELAPSED time, not a pass count) for the auto-arm to claim this home (its
 #      in-progress claim state/.claude-autoarm-claim, published before its
 #      identity gate and the only proof that exists during that gate's ancestry
-#      walk, and trusted only while that record is younger than $GRACE so a
-#      walk that hangs rather than crashes cannot defer every later Stop
-#      forever; a live OPEN generation claim in the state/.claude-autoarm-epoch
+#      walk, and trusted only while that record is younger than $GRACE and no
+#      publisher this guard already deferred to has stayed live and unproven
+#      for $GRACE, so a walk that hangs rather than crashes cannot defer every
+#      later Stop forever, even when each Stop republishes a fresh record; a live OPEN generation claim in the state/.claude-autoarm-epoch
 #      ledger - fm_autoarm_claim_open - or a legacy build's lock-holding claim
 #      under the legacy abandonment proof) or to record a fresh actionable exit-2
 #      outcome (state/.claude-autoarm-epoch) for this event epoch - either proof
@@ -180,6 +181,7 @@ BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 AUTOARM_CLAIM="$STATE/.claude-autoarm-claim"
+CLAIM_EPISODE="$STATE/.claude-autoarm-claim-episode"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
@@ -191,13 +193,20 @@ budget_reset() {
 }
 
 fm_supervision_status "$STATE" "$GRACE"
+# The oldest live in-progress publisher this guard deferred to, forgotten on
+# every proof that recovery happened (autoarm_claim_in_progress owns why).
+claim_episode_clear() {
+  rm -f "$CLAIM_EPISODE" 2>/dev/null || true
+}
 if [ "$FM_SUP_NEEDED" = false ]; then
+  claim_episode_clear
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  claim_episode_clear
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
@@ -366,25 +375,70 @@ budget_account_current_epoch() {  # [observe|block]
 # started_at is mandatory exactly as identity is: a record whose age cannot be
 # read cannot be proven fresh, and an unverifiable claim must not defer
 # (fm_autoarm_claim_open refuses an identityless entry for the same reason).
-autoarm_claim_in_progress() {
-  local pid identity started current
-  pid=$(sed -n '1s/^pid=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
-  identity=$(sed -n '2s/^identity=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
-  started=$(sed -n '3s/^started_at=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
-  [ -n "$identity" ] || return 1
-  case "$started" in
+#
+# Bounding one record's age does not bound a hang that REPEATS. Every Stop fires
+# a new hook, and each publishes a brand-new record with a fresh started_at over
+# the previous one, so a walk that wedges on every firing shows the guard a young
+# live claim every time and no single record ever ages out. The bound therefore
+# also runs across records: the first live claim this guard defers to is kept in
+# state/.claude-autoarm-claim-episode, and once that publisher is STILL alive
+# and unchanged a full $GRACE later it has been inside the gate that long
+# without reaching a generation claim, whichever fresh record now stands in
+# front of it. That record is the whole state - the same three fields, judged by
+# the same liveness standard - so it needs no clock of its own and no gap
+# heuristic: it ends the moment its publisher dies or changes (a crashed or
+# timed-out hook is not a hang), and claim_episode_clear ends it on every proof
+# that recovery happened - a healthy watcher, an open generation claim, a fresh
+# terminal epoch outcome, or supervision no longer being needed - so a home that
+# recovers starts clean and no record can condemn later claims unproven.
+claim_fields() {  # file -> CLAIM_PID CLAIM_IDENTITY CLAIM_STARTED
+  CLAIM_PID=$(sed -n '1s/^pid=//p' "$1" 2>/dev/null || true)
+  CLAIM_IDENTITY=$(sed -n '2s/^identity=//p' "$1" 2>/dev/null || true)
+  CLAIM_STARTED=$(sed -n '3s/^started_at=//p' "$1" 2>/dev/null || true)
+  [ -n "$CLAIM_IDENTITY" ] || return 1
+  case "$CLAIM_STARTED" in
     ''|*[!0-9]*) return 1 ;;
   esac
+}
+
+claim_publisher_alive() {  # pid identity
+  local current
+  fm_pid_alive "$1" || return 1
+  current=$(fm_pid_identity "$1" 2>/dev/null || true)
+  [ -n "$current" ] && [ "$current" = "$2" ]
+}
+
+autoarm_claim_in_progress() {
+  local now pid identity started tmp
+  claim_fields "$AUTOARM_CLAIM" || return 1
+  pid=$CLAIM_PID
+  identity=$CLAIM_IDENTITY
+  started=$CLAIM_STARTED
+  now=$(date +%s)
   # Cheapest gate first: an expired claim is decided with no fork at all.
-  [ "$(( $(date +%s) - started ))" -lt "$GRACE" ] || return 1
-  fm_pid_alive "$pid" || return 1
-  current=$(fm_pid_identity "$pid" 2>/dev/null || true)
-  [ -n "$current" ] && [ "$current" = "$identity" ]
+  [ "$(( now - started ))" -lt "$GRACE" ] || return 1
+  claim_publisher_alive "$pid" "$identity" || return 1
+  if claim_fields "$CLAIM_EPISODE" \
+    && { { [ "$CLAIM_PID" = "$pid" ] && [ "$CLAIM_IDENTITY" = "$identity" ]; } \
+      || claim_publisher_alive "$CLAIM_PID" "$CLAIM_IDENTITY"; }; then
+    [ "$(( now - CLAIM_STARTED ))" -lt "$GRACE" ]
+    return
+  fi
+  tmp="$CLAIM_EPISODE.tmp.$$"
+  if printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$pid" "$identity" "$now" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$CLAIM_EPISODE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  return 0
 }
 
 autoarm_owns_recovery() {
   local pid role outcome age
-  fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    claim_episode_clear
+    return 0
+  fi
   # A live OPEN generation claim owns recovery: the ledger names a live,
   # identity-matched owner still arming that is not stuck (fm_autoarm_claim_open
   # in bin/fm-wake-lib.sh owns that predicate). A finished, dead,
@@ -394,6 +448,7 @@ autoarm_owns_recovery() {
   # cover a claim that finished moments ago, so a genuine handoff is not
   # duplicated, while a stale one now reaches the block.
   if fm_autoarm_claim_open "$STATE" "$GRACE"; then
+    claim_episode_clear
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
@@ -416,12 +471,14 @@ autoarm_owns_recovery() {
     rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
+        claim_episode_clear
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
         return 0
       fi
       ;;
     failed)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      [ "$age" -ge "$EPOCH_FRESH" ] || claim_episode_clear
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         [ "$BUDGET_INITIALIZED_FAILURE" -eq 1 ] && return 0
@@ -429,6 +486,7 @@ autoarm_owns_recovery() {
       ;;
     failed-suppressed)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      [ "$age" -ge "$EPOCH_FRESH" ] || claim_episode_clear
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         :

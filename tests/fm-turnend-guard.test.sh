@@ -2122,6 +2122,75 @@ test_hook_claude_mode_stale_claim_stops_counting() {
   pass "fm-turnend-guard --claude: an in-progress claim stops counting once it outlives the guard grace"
 }
 
+# Bounding one record's age is not enough, because the hang REPEATS: every Stop
+# fires a new auto-arm, and each publishes a brand-new record with a fresh
+# started_at over the last one. The guard therefore never sees an old record,
+# only a young live one, and stood down on every Stop while nothing armed.
+# Each Stop below is a distinct live, identity-matched publisher with a claim
+# stamped now; only the episode across them can end the deferral.
+test_hook_claude_mode_repeating_hang_stops_deferring() {
+  local dir episode p1 p2 p3 p4 p5 id out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-claim-episode")
+  episode="$dir/state/.claude-autoarm-claim-episode"
+  : > "$dir/state/task1.meta"
+
+  sleep 60 &
+  p1=$!
+  sleep 60 &
+  p2=$!
+  sleep 60 &
+  p3=$!
+  sleep 60 &
+  p4=$!
+  sleep 60 &
+  p5=$!
+  # shellcheck disable=SC2329 # Invoked by name from the failure paths below.
+  stop_publishers() { fm_test_stop "$p1"; fm_test_stop "$p2"; fm_test_stop "$p3"; fm_test_stop "$p4"; fm_test_stop "$p5"; }
+  publish_claim() {
+    id=$(watcher_identity "$dir" "$1") || { stop_publishers; fail "could not identify claim publisher $1"; }
+    printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$1" "$id" "$(date +%s)" \
+      > "$dir/state/.claude-autoarm-claim"
+  }
+  stop_at() {  # pid expected-status message
+    publish_claim "$1"
+    out=$(FM_GUARD_GRACE=300 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    [ "$status" -eq "$2" ] || { stop_publishers; expect_code "$2" "$status" "$3"; }
+  }
+
+  # Inside the bound every Stop still defers, so the assertions that follow
+  # isolate the episode's age and nothing else.
+  stop_at "$p1" 0 "the first live claim must be deferred to"
+  [ -e "$episode" ] || { stop_publishers; fail "the guard kept no record of the claim it first deferred to"; }
+  stop_at "$p2" 0 "a fresh claim from a second Stop inside the bound must still be deferred to"
+  stop_at "$p3" 0 "a fresh claim from a third Stop inside the bound must still be deferred to"
+
+  # A full grace later the first publisher is still alive and never reached a
+  # generation claim: a fresh record from yet another Stop no longer counts.
+  id=$(watcher_identity "$dir" "$p1")
+  printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$p1" "$id" "$(( $(date +%s) - 1800 ))" > "$episode"
+  stop_at "$p4" 2 "a hang that republishes a fresh claim on every Stop must not defer forever"
+  assert_contains "$out" "TURN WOULD END BLIND" "the repeating-hang block lost its blind-turn banner"
+  stop_at "$p5" 2 "the block must hold on every later Stop while that publisher stays wedged"
+
+  # The record ends with its publisher: a hook that died was a crash, not a
+  # hang, so the next live claim is deferred to as a new episode.
+  fm_test_stop "$p1"
+  stop_at "$p5" 0 "the record of a publisher that is gone must not condemn a later claim"
+
+  # And it ends on proof that recovery happened.
+  id=$(watcher_identity "$dir" "$p2")
+  printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$p2" "$id" "$(( $(date +%s) - 1800 ))" > "$episode"
+  record_watcher_lock "$dir" "$p3" "$(watcher_identity "$dir" "$p3")"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(FM_GUARD_GRACE=300 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  rm -rf "$dir/state/.watch.lock"
+  [ "$status" -eq 0 ] || { stop_publishers; expect_code 0 "$status" "a healthy watcher must let the stop through"; }
+  [ ! -e "$episode" ] || { stop_publishers; fail "a healthy watcher left the wedged-publisher record behind"; }
+  stop_at "$p4" 0 "after recovery a live claim must be deferred to afresh"
+  stop_publishers
+  pass "fm-turnend-guard --claude: a hang that republishes a fresh claim on every Stop stops deferring once the first live publisher outlives the grace"
+}
+
 # `arming` is the one epoch outcome that unambiguously means "arming right now",
 # and the incident's sixth occurrence blocked while it stood on disk.
 test_hook_claude_mode_dead_arming_epoch_blocks() {
@@ -2533,6 +2602,7 @@ test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_claude_mode_early_claim_is_the_whole_difference
 test_hook_claude_mode_claim_requires_live_matched_publisher
 test_hook_claude_mode_stale_claim_stops_counting
+test_hook_claude_mode_repeating_hang_stops_deferring
 test_hook_claude_mode_dead_arming_epoch_blocks
 test_hook_claude_mode_wait_is_bounded_by_elapsed_time
 test_hook_claude_mode_trailing_check_catches_claim_published_at_deadline
