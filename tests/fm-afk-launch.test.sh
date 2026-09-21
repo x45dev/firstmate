@@ -818,7 +818,10 @@ unit_daemon_terminal_inherits_the_captain_harness() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-harness.XXXXXX")
   mkdir -p "$st/state"
   entry="$st/entry"
-  printf '#!/usr/bin/env bash\nprintf "%%s" "${FM_DAEMON_PRIMARY_HARNESS:-}" > "$FM_HOME/seen-harness"\n' > "$entry"
+  cat > "$entry" <<'SH'
+#!/usr/bin/env bash
+printf "%s" "${FM_DAEMON_PRIMARY_HARNESS:-}" > "$FM_HOME/seen-harness"
+SH
   chmod +x "$entry"
   for backend in tmux herdr; do
     rm -f "$st/seen-harness"
