@@ -121,14 +121,6 @@ unit_pi_never_launches_the_daemon() {
     else
       fail "$harness: start did not refuse cleanly (rc=$rc): $out"
     fi
-    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$harness" \
-      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start-native' _ "$LAUNCH" 2>&1)
-    rc=$?
-    if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
-      pass "$harness: start-native refuses to prepare a daemon"
-    else
-      fail "$harness: start-native did not refuse (rc=$rc): $out"
-    fi
     rm -rf "$st"
   done
 }
@@ -641,29 +633,6 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
-# The harness-hosted route is retired: a harness reaps its own background jobs
-# and leaves state/.afk with no daemon behind it. start-native must refuse
-# before writing any state, on every daemon-running harness.
-unit_start_native_is_retired() {
-  local st harness out rc
-  for harness in claude grok codex; do
-    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
-    mkdir -p "$st/state"
-    confirm_posture "$st" || fail "native retired: could not confirm fixture posture"
-    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$harness" \
-      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start-native' _ "$LAUNCH" 2>&1)
-    rc=$?
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'start-native is retired' >/dev/null \
-      && printf '%s' "$out" | grep -F 'bin/fm-afk-launch.sh start' >/dev/null \
-      && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
-      pass "$harness: start-native refuses and points at the terminal-backed start"
-    else
-      fail "$harness: start-native did not refuse cleanly (rc=$rc): $out"
-    fi
-    rm -rf "$st"
-  done
-}
-
 # A record left by the retired route still retires cleanly on stop.
 unit_legacy_native_record_stops() {
   local st
@@ -719,25 +688,6 @@ unit_status_reports_reaped_daemon() {
     pass "status: a reaped daemon under a standing flag reads as NOT supervising"
   else
     fail "status: reaped daemon still read as supervising (rc=$rc): $out"
-  fi
-  rm -rf "$st"
-}
-
-unit_native_entry_preserves_prepared_state() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
-  mkdir -p "$st/state"
-  : > "$st/state/.afk"
-  : > "$st/state/.subsuper-escalations"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_STATE_PREPARED=1 bash -c '
-    . "$1"
-    FM_AFK_DAEMON=/bin/true
-    fm_afk_start_main
-  ' _ "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
-    pass "native entry: launcher-prepared lifecycle state is not rewritten"
-  else
-    fail "native entry: launcher-prepared lifecycle state was mutated"
   fi
   rm -rf "$st"
 }
@@ -860,6 +810,41 @@ unit_tmux_planned_record_and_collision() {
   else
     fail "tmux launch: creation failure attempted session teardown"
   fi
+  rm -rf "$st"
+}
+
+unit_daemon_terminal_inherits_the_captain_harness() {
+  local st entry backend got
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-harness.XXXXXX")
+  mkdir -p "$st/state"
+  entry="$st/entry"
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${FM_DAEMON_PRIMARY_HARNESS:-}" > "$FM_HOME/seen-harness"\n' > "$entry"
+  chmod +x "$entry"
+  for backend in tmux herdr; do
+    rm -f "$st/seen-harness"
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$entry" bash -c '
+      . "$1"
+      unset CLAUDECODE GROK_AGENT FM_DAEMON_PRIMARY_HARNESS
+      fm_afk_launch_primary_harness() { printf grok; }
+      tmux() { [ "$1" = new-session ] && env -u CLAUDECODE bash -c "$5"; }
+      fm_backend_source() { :; }
+      fm_backend_herdr_server_ensure() { :; }
+      fm_backend_herdr_cli() {
+        case "$2 $3" in
+          "workspace create") printf "{\"result\":{\"workspace\":{\"workspace_id\":\"w1\"},\"root_pane\":{\"pane_id\":\"p1\"}}}" ;;
+          "pane run") env -u CLAUDECODE bash -c "$5" ;;
+        esac
+      }
+      fm_afk_launch_commit_terminal() { :; }
+      "fm_afk_launch_create_$2" sess:captain tmux
+    ' _ "$LAUNCH" "$backend" >/dev/null 2>&1
+    got=$(cat "$st/seen-harness" 2>/dev/null || true)
+    if [ "$got" = grok ]; then
+      pass "$backend launch: the daemon terminal inherits the captain's resolved harness"
+    else
+      fail "$backend launch: daemon terminal saw harness '$got', not the captain's"
+    fi
+  done
   rm -rf "$st"
 }
 
@@ -1174,15 +1159,14 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
-unit_start_native_is_retired
 unit_legacy_native_record_stops
 unit_status_reports_reaped_daemon
-unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic
 unit_malformed_record_fails_closed
 unit_stop_malformed_record_fails_closed
 unit_tmux_planned_record_and_collision
+unit_daemon_terminal_inherits_the_captain_harness
 unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure

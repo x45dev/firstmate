@@ -26,9 +26,8 @@
 # terminal. A harness-hosted background job (claude's background bash, grok's
 # background tool) is NOT a safe host: the harness reaps it under its own
 # memory accounting, not the kernel's, and state/.afk then outlives the daemon
-# so away mode reads active with nothing supervising. `start-native`, the old
-# harness-hosted route, therefore refuses. Every daemon-running harness uses
-# `start`, which creates a non-visible tracked terminal the harness does not
+# so away mode reads active with nothing supervising. Every daemon-running
+# harness therefore uses `start`, which creates a non-visible tracked terminal the harness does not
 # own (a herdr tab/workspace with --no-focus, or a detached tmux session),
 # never splits the captain's active tab, and NEVER uses shell `&` (which
 # herdr/codex can reap).
@@ -64,10 +63,6 @@
 #                              record it. Idempotent: an already-running daemon
 #                              just refreshes state/.afk; a recorded-but-dead
 #                              terminal is reconciled (closed by id) first.
-#   fm-afk-launch.sh start-native
-#                              Refuses: a harness-hosted background job is reaped
-#                              by the harness, leaving the flag with no daemon.
-#                              Use `start`.
 #   fm-afk-launch.sh status    Read-only: is away mode actually supervising?
 #                              Exit 0 and "supervising" only when a live,
 #                              identity-matched daemon holds this home's daemon
@@ -253,6 +248,14 @@ fm_afk_launch_entry_cmd() {
   printf '%s' "${FM_AFK_LAUNCH_ENTRY:-$FM_ROOT/bin/fm-afk-start.sh}"
 }
 
+# The daemon runs in a terminal the captain's harness does not own, so it
+# cannot detect that harness from its own env or ancestry: pass the captain's
+# resolved harness in, or pane_is_busy reads no mid-turn captain as busy.
+fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
+  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_DAEMON_PRIMARY_HARNESS=%q %q' \
+    "$FM_HOME" "$1" "$2" "$(fm_afk_launch_primary_harness)" "$(fm_afk_launch_entry_cmd)"
+}
+
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
   local pending
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
@@ -283,7 +286,7 @@ fm_afk_launch_record_read() {
   case "$FM_AFK_REC_BACKEND" in
     herdr) [ -n "$extra" ] ;;
     tmux) : ;;
-    # A record left by the retired start-native route: no terminal to close,
+    # A record left by the retired harness-hosted route: no terminal to close,
     # still readable so stop and reconcile can retire it.
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
@@ -482,7 +485,7 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
 # never touches the captain's active tab. Prints the record line on success.
 fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session out wsid pane entry cmd label recovered create_result
+  local captain_target=$1 captain_backend=$2 session out wsid pane cmd label recovered create_result
   session=${captain_target%%:*}
   if [ -z "$session" ] || [ "$session" = "$captain_target" ]; then
     fm_afk_launch_log "cannot derive herdr session from captain target '$captain_target'"
@@ -513,9 +516,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     }
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
-  entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -536,13 +537,11 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
 # captain's window). tmux pane ids are server-global, so the daemon reaches the
 # captain pane by its %id from this separate session.
 fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
-  local captain_target=$1 captain_backend=$2 session entry cmd hash nonce
+  local captain_target=$1 captain_backend=$2 session cmd hash nonce
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
-  entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -626,13 +625,6 @@ fm_afk_launch_start() {
     rm -rf "$backup" || result=1
   fi
   return "$result"
-}
-
-# The harness-hosted route is retired: see the header. It refuses before
-# touching any state so a stale instruction cannot recreate the half-dead flag.
-fm_afk_launch_start_native() {
-  fm_afk_launch_log "start-native is retired: a harness-hosted background job is reaped by the harness and leaves state/.afk with no daemon behind it; run bin/fm-afk-launch.sh start"
-  return 1
 }
 
 # Read-only answer to "is away mode supervising", derived from the daemon being
@@ -733,7 +725,6 @@ fm_afk_launch_main() {
     propose) shift; fm_afk_launch_propose "$@" ;;
     confirm) fm_afk_launch_confirm ;;
     start) fm_afk_launch_start ;;
-    start-native) fm_afk_launch_start_native ;;
     status) fm_afk_launch_status ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;

@@ -3,14 +3,12 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
-#   state/.supervise-daemon.lock, and:
+#   Sets state/.afk, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
 #     - otherwise clears any prior away session's stale escalation artifacts
-#       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
-#       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
-#       already cleared transactionally by bin/fm-afk-launch.sh.
+#       (fm_afk_clear_stale_artifacts), then execs bin/fm-supervise-daemon.sh in
+#       the foreground.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
@@ -135,11 +133,7 @@ fm_afk_start_main() {
   esac
 
   mkdir -p "$FM_AFK_STATE"
-  if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
-    [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
-  else
-    fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
-  fi
+  fm_afk_flag_write "$FM_AFK_STATE" || { echo "afk: failed to write away-mode flag" >&2; return 1; }
 
   local pid
   pid=$(daemon_lock_pid 2>/dev/null || true)
@@ -154,9 +148,7 @@ fm_afk_start_main() {
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
-    fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
-  fi
+  fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
 
   echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
   exec "$FM_AFK_DAEMON"
