@@ -966,10 +966,10 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
 #
 #   worktree   files appearing in the crew's own task worktree
 #              (crew_worktree_written_since in fm-classify-lib.sh)
-#   movement   the token counter or the rendered content moved between two
-#              samples (bin/fm-progress-lib.sh); a turn timer ticking on its own
-#              is deliberately NOT admitted, because a hung foreground call
-#              ticks exactly the same way
+#   movement   the token counter moved between two samples
+#              (bin/fm-progress-lib.sh); a turn timer ticking on its own, or
+#              rendered content moving, is deliberately NOT admitted, because a
+#              hung foreground call renders exactly the same way
 #   pipeline   the validation run reports recent activity on the step it is
 #              executing (crew_wedge_class in fm-classify-lib.sh), which is the
 #              only thing separating a run waiting on a remote service from a
@@ -1000,7 +1000,7 @@ wedge_defer() {  # <window> <since-file> <triage-label> <idle-age> <evidence> <d
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, $detail for ${wage}s, rechecked on a long cadence not a wedge; confirm the progress is real)"
+    "stale: $win (idle ${age}s, $detail for ${wage}s - the one-hour bound recheck, not a doubt about the evidence)"
   triage_log "absorbed $label ($evidence since the idle window opened, idle ${age}s): $win"
 }
 
@@ -2575,6 +2575,7 @@ EOF
     fi
     allowance_park_check "$w" "$task" "$key" "" "$mate_skips_pane"
     if [ "$mate_skips_pane" -eq 1 ]; then
+      [ -z "$task" ] || fm_progress_sample_clear "$STATE" "$task"
       continue
     fi
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then

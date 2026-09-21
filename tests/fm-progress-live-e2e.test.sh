@@ -14,7 +14,11 @@
 #             false one costs a live worker its supervision;
 #   settled   two samples of the same pane once the turn has ended and the
 #             rendering has stopped MUST read `still`, or the check has gone
-#             inert and nothing would ever catch a real hang.
+#             inert and nothing would ever catch a real hang;
+#   hung      a turn blocked on one foreground command that never produces
+#             output must NEVER read `advanced` across the latch window, or the
+#             one-hour busy bound the latch defers could never fire on a real
+#             hang.
 #
 # The library deliberately models no harness's notation: the footer digest
 # carries liveness whatever the footer says, and only the progress counter
@@ -173,6 +177,55 @@ wait_settled() {  # <window> <budget-secs>
   return 1
 }
 
+# The hung-tool direction: a turn blocked on one foreground command that never
+# produces output is the job the one-hour busy bound exists to catch, so its
+# pane must never read `advanced` across the latch window, whatever timer its
+# harness renders beside the running command. Observations run back to back on
+# one record, the way the watcher's own poll does.
+check_hung_tool() { # <name> <version> <window> <home>
+  local name=$1 version=$2 win=$3 home=$4 state="$LAB/progress-state" id="$1-hung"
+  local i=0 found=0 end verdict seen='' advanced=0
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "live-$name" \
+    'Firstmate live check: run exactly this shell command in the FOREGROUND (not in the background) with a tool timeout of 450000 ms, and wait for it to finish: timeout 330 tail -f /dev/null ; then reply with the single word done.' \
+    >/dev/null 2>&1; then
+    FAILED=1; printf 'not ok - %s (%s): the steering path refused the hung-tool turn\n' "$name" "$version" >&2; return 1
+  fi
+  while [ "$i" -lt 90 ]; do
+    if pgrep -f '^tail -f /dev/null$' >/dev/null 2>&1; then found=1; break; fi
+    sleep 1; i=$((i + 1))
+  done
+  if [ "$found" -ne 1 ]; then
+    FAILED=1; printf 'not ok - %s (%s): the hung command never started, so the hung-tool direction proved nothing\n' "$name" "$version" >&2
+    capture_pane "$win" | tail -20 | sed 's/^/# /' >&2; return 1
+  fi
+  sleep 20
+  capture_pane "$win" > "$LAB/$id.first"
+  fm_progress_sample_clear "$state" "$id"
+  fm_progress_observe "$state" "$id" "$(cat "$LAB/$id.first")" >/dev/null
+  end=$(( $(date +%s) + FM_PROGRESS_LATCH_MAX_SECS + GAP ))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    sleep "$GAP"
+    capture_pane "$win" > "$LAB/$id.cur"
+    verdict=$(fm_progress_observe "$state" "$id" "$(cat "$LAB/$id.cur")")
+    seen="$seen${seen:+ }$verdict"
+    [ "$verdict" != advanced ] || advanced=1
+  done
+  capture_pane "$win" > "$LAB/$id.second"
+  if ! pgrep -f '^tail -f /dev/null$' >/dev/null 2>&1; then
+    FAILED=1; printf 'not ok - %s (%s): the hung command ended before the latch window closed, so the direction is vacuous\n' "$name" "$version" >&2; return 1
+  fi
+  note "$name ($version): a hung foreground command read '$seen' across ${FM_PROGRESS_LATCH_MAX_SECS}s"
+  printf '# first vs last capture of the hung pane (< first, > last):\n' >&2
+  diff "$LAB/$id.first" "$LAB/$id.second" | sed 's/^/# /' >&2 || true
+  if [ "$advanced" -ne 0 ]; then
+    FAILED=1
+    printf 'not ok - MOVEMENT SPOOFED: %s (%s) rendered a hung foreground command that read "advanced", which would defer the busy bound through the latch.\n' "$name" "$version" >&2
+    return 1
+  fi
+  pkill -f '^tail -f /dev/null$' 2>/dev/null || true
+  return 0
+}
+
 check_harness_movement() {  # <name>
   local name=$1 version cmd win="px-$1" ready_rc verdict home
   version=$(harness_version "$name")
@@ -257,6 +310,9 @@ check_harness_movement() {  # <name>
     return 0
   fi
   note "$name ($version): settled sample pairs read '$seen'"
+
+  check_hung_tool "$name" "$version" "$win" "$home" || { tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true; return 0; }
+  pass "$name ($version): a hung foreground command never reads as advanced"
 
   CHECKED=$((CHECKED + 1))
   pass "$name ($version): a running turn is not read as still, and a settled pane is"

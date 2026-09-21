@@ -408,9 +408,9 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 ## Rendered movement evidence
 
 [`bin/fm-progress-lib.sh`](../../bin/fm-progress-lib.sh) decides whether a quiet pane holds a live worker or a process that has stopped, and it decides it from what the harness vendor renders.
-`FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` is the guard that proves that verdict against every installed harness, in both directions: two samples taken while a real turn runs must not read `still`, and sample pairs of the same pane once it has settled must never read `advanced` and must reach `still` within three pairs.
+`FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` is the guard that proves that verdict against every installed harness, in three directions: two samples taken while a real turn runs must not read `still`, sample pairs of the same pane once it has settled must never read `advanced` and must reach `still` within three pairs, and a turn blocked on one foreground command that never produces output must never read `advanced` across the latch window.
 
-Verified live on 2026-09-21T11:31:04Z against claude 2.1.278 (Claude Code), tmux 3.4, Linux, with the corrected guard and the library at head 1f8d1f40 plus the settled-direction change.
+Verified live on 2026-09-21T22:15:43Z against claude 2.1.278 (Claude Code), tmux 3.4, Linux, with the pipeline head ac200f20 guard and library plus the token-only `advanced` verdict and the hung-tool direction.
 It was started from a worktree claude already trusts, and the only difference from the command below was a scratch-only override of the start directory to that trusted folder; no trust was granted from inside the guard.
 
 ```sh
@@ -418,15 +418,36 @@ FM_PROGRESS_LIVE_E2E=1 FM_PROGRESS_LIVE_HARNESSES=claude bash tests/fm-progress-
 ```
 
 ```text
-# claude (2.1.278 (Claude Code)): a running turn reads 'advanced'
+# claude (2.1.278 (Claude Code)): a running turn reads 'alive'
 # claude (2.1.278 (Claude Code)): settled sample pairs read 'alive, still'
+# claude (2.1.278 (Claude Code)): a hung foreground command read 'alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive' across 240s
+# first vs last capture of the hung pane (< first, > last):
+# 23,24c23,24
+# < Reading any waiting inbox messages · 19s
+# <   ⎿ $ timeout 330 tail -f /dev/null (20s)
+# ---
+# > ● Reading any waiting inbox messages · 4m 31s
+# >   ⎿ $ timeout 330 tail -f /dev/null (4m 30s)
+# 43c43
+# < ✢ Boondoggling… (26s · ↓ 391 tokens)
+# ---
+# > ✻ Boondoggling… (4m 37s · ↓ 391 tokens)
+ok - claude (2.1.278 (Claude Code)): a hung foreground command never reads as advanced
 ok - claude (2.1.278 (Claude Code)): a running turn is not read as still, and a settled pane is
 ok - live movement-evidence guard: 1 harness(es) separate a running turn from a settled pane
 exit=0
 ```
 
+The running-turn pair read `alive` rather than `advanced`, most likely because its first sample preceded claude's token counter, which satisfies that direction because a running turn only must not read `still`.
+A token-count change on a real claude capture was checked offline and reads `advanced`.
 The settled pairs read `alive, still`: the first pair caught a footer transition and the second reached `still`, which is exactly the case the settled assertion admits and a demand for `still` from the first pair would have failed.
 `advanced` is the only verdict that feeds the latch and defers a wedge, and `still` is the only verdict that admits one, so a single `alive` pair on the way to `still` harms neither.
+
+Why `advanced` is the token counter alone: on the pre-redesign library, where new body content also read `advanced`, a hung foreground command read `advanced` on most polls, 22 of 31 and then, keeping every capture, 18 of 31, both runs on 2026-09-21.
+The cause was the running tool's header bullet blinking and its timer changing shape at each minute inside the body, while the token count stayed static.
+Normalising digits in the line digests alone did not fix it.
+Replaying the same 32 kept captures through the token-only library read `unknown` and then `alive` on all 31 polls, so body movement now proves the process is alive and defers nothing.
+The earlier settled-only pass, at head 1f8d1f40 on 2026-09-21T11:31:04Z, is superseded by the record above.
 
 How the earlier runs led here, both against claude 2.1.278:
 
@@ -436,7 +457,7 @@ How the earlier runs led here, both against claude 2.1.278:
 Every other harness is not run here: this fleet dispatches only claude, so no tokens are spent on runtimes nobody uses.
 
 The liveness counter models no harness's notation, so a footer this release cannot parse degrades to `alive` rather than to `still`, and a harness whose footer the progress counter does not recognise is a `# ... reads 'alive'` note in that guard's output, not a failure.
-The two failures it exists to catch are named in its output: `MOVEMENT BLIND` for a running turn read as `still`, and `MOVEMENT INERT` for a settled pane that never is.
+The three failures it exists to catch are named in its output: `MOVEMENT BLIND` for a running turn read as `still`, `MOVEMENT INERT` for a settled pane that never is, and `MOVEMENT SPOOFED` for a hung foreground command read as `advanced`.
 
 ## Gemini
 

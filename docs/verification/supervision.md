@@ -243,15 +243,15 @@ tests/fm-crew-state.test.sh
 A pane that renders nothing new is the only evidence the wedge bound ever had, and it cannot tell a hung foreground call from a live worker on a long quiet step.
 [`bin/fm-progress-lib.sh`](../../bin/fm-progress-lib.sh) is the single owner of the movement verdict that separates them, and [`bin/fm-watch.sh`](../../bin/fm-watch.sh) consults it, the validation run's own step-activity recency, and the crew's completion state before escalating a possible wedge.
 
-The verdict reads three counters across two samples and either of the two progress counters alone carries an `advanced`, so no single vendor string is load-bearing:
+The verdict reads three counters across two samples, and only the token counter carries an `advanced`, so the footer and content counters can prove a process is alive without ever deferring a wedge:
 
 | Counter | Source | What it carries |
 | --- | --- | --- |
 | `footer` | a digest of the last `FM_PROGRESS_FOOTER_LINES` non-blank lines | liveness only; it models no notation, so a footer this release cannot parse degrades to `alive` and never to `still` |
-| `tokens` | a progress counter read out of that footer | forward progress, where the notation is one the library recognises |
-| `content` | a rendered line above the footer that appeared nowhere in the previous capture, footer included | forward progress, for a harness whose footer is frozen; a line that only changes sides of the footer boundary because another line appeared or expired inside the footer is not new output |
+| `tokens` | a progress counter read out of that footer | forward progress, the only counter that reads `advanced`, and only while it is rendered in both samples; a counter that appears or disappears between samples is a turn starting or ending, not progress |
+| `content` | a rendered line above the footer that appeared nowhere in the previous capture, footer included | liveness only, for a harness whose footer is frozen; body content cannot tell a hung foreground call from progress, because on claude 2.1.278 the running tool's header bullet blinks and its timer changes shape at each minute while the token count stays static; a line that only changes sides of the footer boundary because another line appeared or expired inside the footer is not new output |
 
-`still` is the only verdict that admits a wedge, and it is reached only when two captures that each render something are compared and none of the three counters moved.
+`advanced` needs the token counter to move, `alive` is a moved footer or a new body line, and `still` is the only verdict that admits a wedge, reached only when two captures that each render something are compared and none of the three counters moved.
 A blank capture is no observation: it answers `unknown` without touching the record, so a transient blank can neither read as progress nor become the anchor the next real capture is compared against.
 A record written without the per-line digests has no comparable prior and also answers `unknown`.
 An unreadable surface answers `unknown`, which licenses nothing in either direction.
@@ -261,31 +261,37 @@ Verified deterministically on 2026-09-21:
 ```sh
 tests/fm-progress-lib.test.sh
 tests/fm-watch-triage.test.sh
+tests/fm-wake-queue.test.sh
 tests/fm-crew-state.test.sh
 ```
 
 ```text
 ok - an unchanged pane reports still - the only verdict that admits a wedge
 ok - a ticking turn timer alone reports alive: proof of life, not of progress
-ok - an analysis pass counting 39 -> 60 reports advanced past the one-hour bound
+ok - new rendered content reports alive even when the whole footer is frozen
+ok - an analysis pass whose token count climbs reports advanced past the one-hour bound
+ok - a hung foreground command with a static token count never reads advanced and never latches
+ok - a token counter appearing or disappearing between samples reads alive and latches nothing
 ok - a surface rendering no counter reports unknown: stillness is observed, never inferred
 ok - a transient footer line appearing or expiring reads alive, never advanced
 ok - a real sample, a blank capture, then the same real capture never reads advanced
 ok - a clock-form timer and a footer notation nothing models both read as movement
-ok - a worker whose rendered output advances is not wedge-escalated, while one whose only moving part is its clock still is
+ok - a measured advance defers the wedge across the window being judged, and stops deferring it once the advance is older than that window
 ok - a validation run reporting recent step activity is not wedge-escalated, while one reporting a quiet step still is
 ok - a crew holding a green PR is not wedge-escalated, while a failed one on the same idle pane still is
 ok - a busy pane past the completed-turn bound still wedge-escalates in a crew whose last run reads done
 ok - a retired endpoint stops at the recorded-window check, while a live window whose capture came back empty keeps its bookkeeping
 ok - a busy marker over a pane that moves nothing across two samples is not reported working, while a moving one still is
+ok - only a recently established still verdict refuses a busy claim; one older than the maximum gap reads unknown
+ok - a secondmate's paused still verdict is dropped, so a resumed turn is not reported as a stalled wake loop
 ok - one declared wait rechecks exactly once per window across eight polls and a churning pane hash
 ok - a working run carries its own step-activity recency, and a run with no active step never reads as recent
 ```
 
-`tests/fm-progress-lib.test.sh` reported 22 passing assertions with no failures on that run, and the listed `tests/fm-watch-triage.test.sh` assertions were run individually.
+`tests/fm-progress-lib.test.sh` reported 25 passing assertions with no failures on that run, and the listed `tests/fm-watch-triage.test.sh` assertions were run individually.
 
-The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in both directions - a running turn must not read `still`, and a settled pane must never read `advanced` and must reach `still`.
-That guard passed against claude in both directions on 2026-09-21, recorded verbatim in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence"); the other harnesses are not run there because this fleet dispatches only claude.
+The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in three directions - a running turn must not read `still`, a settled pane must never read `advanced` and must reach `still`, and a hung foreground command must never read `advanced` across the latch window.
+That guard passed against claude in all three directions on 2026-09-21, recorded verbatim in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence"); the other harnesses are not run there because this fleet dispatches only claude.
 
 ### The declared-wait repeat, unconfirmed
 

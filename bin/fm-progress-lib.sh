@@ -21,11 +21,13 @@
 #
 # A dead process moves none of the three. A live worker moves the footer, since
 # a running harness redraws its own status line, and one making forward progress
-# also moves the token counter or the content. That separation is what lets one
-# primitive answer both questions from one sample pair:
+# also moves the token counter. That separation is what lets one primitive
+# answer both questions from one sample pair:
 #
-#   advanced  tokens or content moved - forward progress, so not a wedge
-#   alive     only the footer moved - the process is running but shows no progress
+#   advanced  the token counter moved while rendered in both samples - forward
+#             progress, so not a wedge
+#   alive     the footer or a new body line moved - the process is running but
+#             shows no measured progress
 #   still     none of the three moved - no proof of life at all
 #   unknown   no comparable prior sample, so nothing is established yet
 #
@@ -41,6 +43,14 @@
 # counter knows a notation, and where it fails to match, a live worker degrades
 # to `alive` rather than to `still`: the safe direction, since `alive` defers no
 # wedge and licenses no claim that a worker is running.
+#
+# Only the token counter reads as progress, and content never does. On claude
+# 2.1.278 a hung foreground command's body moves on most polls - the running
+# tool's header bullet blinks and its timer changes shape at each minute - while
+# its token count stays static, so body content cannot tell a hung call from
+# progress. A counter that appears or disappears between samples is not progress
+# either: a turn starting or ending must not latch an advance. Content movement
+# still proves the process is alive, which is why it reads `alive`.
 #
 # The content counter is a set comparison and not a digest of the body. The
 # footer is a fixed count of lines from the bottom, so a line that appears or
@@ -279,9 +289,9 @@ fm_progress_observe() {  # <state-dir> <id> <tail>
     printf 'unknown'
     return 0
   fi
-  if [ "$tokens" != "$prev_tokens" ] || _fm_progress_new_body_line "$lines" "$prev_lines"; then
+  if [ "$tokens" != - ] && [ "$prev_tokens" != - ] && [ "$tokens" != "$prev_tokens" ]; then
     verdict=advanced
-  elif [ "$footer" != "$prev_footer" ]; then
+  elif [ "$footer" != "$prev_footer" ] || _fm_progress_new_body_line "$lines" "$prev_lines"; then
     verdict=alive
   else
     verdict=still

@@ -100,23 +100,83 @@ TOK_A=$(capture 'esc to interrupt' '  Analysing the failure' 'Working... (41s) |
 TOK_B=$(capture 'esc to interrupt' '  Analysing the failure' 'Working... (101s) | 18.9k tokens')
 [ "$(observe_pair tokens "$TOK_A" "$TOK_B")" = advanced ] \
   || fail "a moving token counter must report advanced"
-pass "a moving token counter reports advanced"
+[ "$(fm_progress_advanced_age "$STATE" tokens)" != - ] \
+  || fail "a moving token counter must record the advance"
+pass "a moving token counter reports advanced and records the advance"
 
-# --- forward progress: the rendered content moves, counters flat ------------
+# --- new rendered content is proof of life, not of progress ------------------
 
 BODY_A=$(capture_body '  Reading the watcher' '  Analysing the failure')
 BODY_B=$(capture_body '  Reading the watcher' '  Analysing the failure' '  Found the wedge timer')
-[ "$(observe_pair body "$BODY_A" "$BODY_B")" = advanced ] \
-  || fail "new rendered content must report advanced even with a frozen footer"
-pass "new rendered content reports advanced even when the whole footer is frozen"
+[ "$(observe_pair body "$BODY_A" "$BODY_B")" = alive ] \
+  || fail "new rendered content with a frozen footer must report alive, never advanced or still"
+[ "$(fm_progress_advanced_age "$STATE" body)" = - ] \
+  || fail "new rendered content latched an advance"
+pass "new rendered content reports alive even when the whole footer is frozen"
 
-# The captain's measured case: an analysis pass advancing 39 -> 60 of 99 with a
-# frozen-looking footer. This is the capture that was escalated three times.
-PASS_A=$(capture_body '  [39/99] analysing' 'Working... (3601s)')
-PASS_B=$(capture_body '  [60/99] analysing' 'Working... (3601s)')
+# The captain's measured case: an analysis pass advancing 39 -> 60 of 99 past the
+# one-hour bound. Its measurable progress is the token count moving, which is what
+# the pass reads as advanced through.
+PASS_A=$(capture '  [39/99] analysing' 'Working... (3601s) | 10.1k tokens')
+PASS_B=$(capture '  [60/99] analysing' 'Working... (3661s) | 14.8k tokens')
 [ "$(observe_pair analysis "$PASS_A" "$PASS_B")" = advanced ] \
   || fail "a counting analysis pass past the turn bound must report advanced"
-pass "an analysis pass counting 39 -> 60 reports advanced past the one-hour bound"
+pass "an analysis pass whose token count climbs reports advanced past the one-hour bound"
+
+# --- a hung foreground command is never progress ------------------------------
+
+# The job the one-hour bound exists to catch. On claude 2.1.278 the pane of a
+# turn blocked on one foreground command moves on most polls - the footer spinner
+# glyph cycles, the footer and body timers tick, the running tool's header bullet
+# blinks, and the body timer changes shape at each minute - while the token count
+# stays static.
+fmt_secs() {  # <secs>
+  if [ "$1" -lt 60 ]; then printf '%ss' "$1"; else printf '%sm %ss' "$(( $1 / 60 ))" "$(( $1 % 60 ))"; fi
+}
+
+hung_pane() {  # <secs> <glyph> <bullet>
+  local i
+  for i in 1 2 3 4 5 6 7 8; do printf 'scrollback line %s\n' "$i"; done
+  printf '%s Reading any waiting inbox messages · %s\n' "$3" "$(fmt_secs "$1")"
+  printf '  ⎿ $ timeout 330 tail -f /dev/null (%s)\n\n' "$(fmt_secs "$1")"
+  printf '%s Boondoggling… (%s · ↓ 391 tokens)\n' "$2" "$(fmt_secs "$1")"
+  printf '%s\n' '--------' '> ' '--------' 'permissions line'
+}
+
+fm_progress_sample_clear "$STATE" hung
+fm_progress_observe "$STATE" hung "$(hung_pane 19 '✢' '●')" > /dev/null
+hung_advanced=0
+hung_moved=0
+hung_bullets=('●' ' ')
+hung_glyphs=('✢' '✻' '✶' '✳')
+for hung_secs in 24 30 41 47 53 59 61 67 73 79 85 91 97 103; do
+  age_anchor hung 60
+  hung_verdict=$(fm_progress_observe "$STATE" hung \
+    "$(hung_pane "$hung_secs" "${hung_glyphs[$(( hung_secs % 4 ))]}" "${hung_bullets[$(( hung_secs % 2 ))]}")")
+  [ "$hung_verdict" != advanced ] || hung_advanced=1
+  [ "$hung_verdict" != alive ] || hung_moved=$(( hung_moved + 1 ))
+done
+[ "$hung_advanced" -eq 0 ] \
+  || fail "a hung foreground command with a static token count read advanced"
+[ "$hung_moved" -gt 0 ] \
+  || fail "the hung pane never read alive, so the fixture proved nothing"
+[ "$(fm_progress_advanced_age "$STATE" hung)" = - ] \
+  || fail "a hung foreground command latched an advance"
+pass "a hung foreground command with a static token count never reads advanced and never latches"
+
+# --- a counter appearing or disappearing is not progress ----------------------
+
+NOTOK=$(capture 'esc to interrupt' 'Working... (41s)')
+WITHTOK=$(capture 'esc to interrupt' 'Working... (101s) | 12.4k tokens')
+[ "$(observe_pair tok-appears "$NOTOK" "$WITHTOK")" = alive ] \
+  || fail "a token counter appearing between samples must not read advanced"
+[ "$(fm_progress_advanced_age "$STATE" tok-appears)" = - ] \
+  || fail "a token counter appearing latched an advance"
+[ "$(observe_pair tok-vanishes "$WITHTOK" "$NOTOK")" = alive ] \
+  || fail "a token counter disappearing between samples must not read advanced"
+[ "$(fm_progress_advanced_age "$STATE" tok-vanishes)" = - ] \
+  || fail "a token counter disappearing latched an advance"
+pass "a token counter appearing or disappearing between samples reads alive and latches nothing"
 
 # --- an unreadable surface is not stillness ---------------------------------
 
@@ -146,12 +206,12 @@ notice_pane() {  # <with-notice: yes|no>
   || fail "a footer notice appearing must not read as rendered progress"
 pass "a transient footer line appearing or expiring reads alive, never advanced"
 
-# The same pane with genuinely new output above the footer must still count.
+# The same pane with genuinely new output above the footer is still proof of life.
 NEW_LINE=$(notice_pane no)
 NEW_LINE=${NEW_LINE/'scrollback line 8'/$'scrollback line 8\n  wrote the summary file'}
-[ "$(observe_pair new-line "$(notice_pane no)" "$NEW_LINE")" = advanced ] \
-  || fail "a genuinely new rendered line must still read advanced"
-pass "a rendered line that appeared nowhere in the previous capture still reads advanced"
+[ "$(observe_pair new-line "$(notice_pane no)" "$NEW_LINE")" = alive ] \
+  || fail "a genuinely new rendered line must read alive, never still"
+pass "a rendered line that appeared nowhere in the previous capture reads alive"
 
 # --- a blank capture is not an observation -----------------------------------
 

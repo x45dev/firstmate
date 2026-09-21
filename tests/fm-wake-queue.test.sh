@@ -490,6 +490,55 @@ SH
   pass "an active turn defers the secondmate stall escalation without cancelling it"
 }
 
+# The watcher stops sampling a secondmate's pane, so a still verdict taken while
+# the mate was paused would otherwise survive on disk and, once the mate resumed
+# inside an open turn, refuse its busy claim and ring the steering doorbell into
+# a healthy worker as a stalled wake loop. The watcher drops the record where it
+# stops sampling, so a fresh one from before the resume answers nothing.
+test_secondmate_resumed_turn_is_not_refused_by_a_paused_still_verdict() {
+  local dir state sub fakebin sample
+  dir=$(make_case secondmate-resumed-turn)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
+    > "$sub/state/.wake-queue"
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  capture-pane) printf 'working\n' ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  # A still verdict from the stretch the mate spent paused: well inside the
+  # maximum sample gap, so only the watcher dropping it can stop it refusing.
+  sample=$(. "$ROOT/bin/fm-progress-lib.sh"; fm_progress_sample_path "$state" mate)
+  printf 'v1 ts=%s verdict=still footer=a tokens=b lines=c advanced_ts=-\n' \
+    "$(( $(date +%s) - 30 ))" > "$sample"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 \
+    > "$dir/watch-resumed.out" 2> "$dir/watch-resumed.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-resumed.out" >/dev/null \
+    || fail "a resumed mate was reported as a stalled wake loop through its paused still verdict: $(cat "$dir/watch-resumed.out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a resumed mate published a durable stall notification"
+  [ ! -e "$sample" ] \
+    || fail "the watcher kept a progress sample for a secondmate it does not sample"
+  pass "a secondmate's paused still verdict is dropped, so a resumed turn is not reported as a stalled wake loop"
+}
+
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected epoch
   dir=$(make_case secondmate-stall-marker-symlink)
@@ -1915,6 +1964,7 @@ test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
 test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
 test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
+test_secondmate_resumed_turn_is_not_refused_by_a_paused_still_verdict
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt

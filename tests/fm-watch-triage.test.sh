@@ -4852,20 +4852,20 @@ arm_wedge_window() {  # <state> <key> <pane-text> <idle-secs>
 }
 
 # A pane that redraws its own status line faster than the watcher polls, which
-# is what every live harness actually does, with its rendered CONTENT held in a
+# is what every live harness actually does, with its token count held in a
 # separate file the test advances. Running the clock independently of the test
 # is what makes these phases deterministic: every poll sees a moving footer, so
 # the pane is never momentarily `still`, and the only thing that can record an
-# advance is the test moving the content.
-start_pane_ticker() {  # <capture-file> <content-file> <stop-file>
-  local capture=$1 content=$2 stop=$3
+# advance is the test moving the token count.
+start_pane_ticker() {  # <capture-file> <tokens-file> <stop-file>
+  local capture=$1 tokens=$2 stop=$3
   : > "$stop"
   (
     i=0
     while [ -e "$stop" ]; do
       i=$(( i + 1 ))
-      progress_pane "$(cat "$content" 2>/dev/null || printf '  [39/99] analysing')" \
-        "Working... (${i}s)" > "$capture.tmp"
+      progress_pane '  analysing' \
+        "Working... (${i}s) | $(cat "$tokens" 2>/dev/null || printf '39.0k') tokens" > "$capture.tmp"
       mv -f "$capture.tmp" "$capture"
       command sleep 0.2
     done
@@ -4908,11 +4908,11 @@ fire_wedge_next_poll() {  # <state> <key> <escalate-secs>
 # and the verdict is transient, so reading the verdict would put a race in the
 # test that is not in the behaviour.
 test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
-  local dir state fakebin out capture_file content_file stop_file window key
+  local dir state fakebin out capture_file tokens_file stop_file window key
   local pid ticker sig adv_first adv_later
   dir=$(make_case wedge-measured-progress); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
-  content_file="$dir/content.txt"; stop_file="$dir/ticking"
+  tokens_file="$dir/content.txt"; stop_file="$dir/ticking"
   window="test:fm-progressing"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/progressing.meta"
   record_pi_busy "$state" progressing
@@ -4923,11 +4923,11 @@ test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
   prime_turnend_seen "$state/progressing.turn-ended"
 
   # Phase A: the analysis pass the captain watched advance from 39 to 60 of 99.
-  # Its content moves once, several polls before the threshold, and only the
+  # Its token count moves once, several polls before the threshold, and only the
   # turn timer moves after that - so the pair the threshold poll reads is not an
   # advance, and only the latched one defers it.
-  printf '  [39/99] analysing' > "$content_file"
-  ticker=$(start_pane_ticker "$capture_file" "$content_file" "$stop_file")
+  printf '39.0k' > "$tokens_file"
+  ticker=$(start_pane_ticker "$capture_file" "$tokens_file" "$stop_file")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=60 FM_PROGRESS_MIN_GAP_SECS=0 FM_PROGRESS_LATCH_MAX_SECS=600 \
@@ -4938,16 +4938,16 @@ test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first poll did not complete: $(cat "$out")"; }
   wait_poll_cycle "$state" "$pid" \
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second poll did not complete: $(cat "$out")"; }
-  # The content advance, measured by the watcher over a live pane rather than
+  # The token advance, measured by the watcher over a live pane rather than
   # placed on disk for it.
-  printf '  [60/99] analysing' > "$content_file"
+  printf '60.0k' > "$tokens_file"
   wait_poll_cycle "$state" "$pid" \
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the advancing poll did not complete: $(cat "$out")"; }
   wait_poll_cycle "$state" "$pid" \
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the poll after the advance did not complete: $(cat "$out")"; }
   adv_first=$(fm_progress_advanced_age "$state" progressing)
   [ "$adv_first" != - ] \
-    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the watcher did not measure the content advance as progress"; }
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the watcher did not measure the token advance as progress"; }
   # Several more polls of the turn timer alone. The advance must survive them,
   # which is the whole point, and must NOT be refreshed by them, which is what
   # keeps the ceiling meaningful.
@@ -4980,8 +4980,8 @@ test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
   rm -f "$state/.writing-since-$key" "$state/.writing-resurfaced-$key" \
     "$state/.wedge-escalations-$key" "$state/.stale-since-$key"
   fm_progress_sample_clear "$state" progressing
-  printf '  [60/99] analysing' > "$content_file"
-  ticker=$(start_pane_ticker "$capture_file" "$content_file" "$stop_file")
+  printf '60.0k' > "$tokens_file"
+  ticker=$(start_pane_ticker "$capture_file" "$tokens_file" "$stop_file")
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -4993,7 +4993,7 @@ test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first poll of the expiry phase did not complete: $(cat "$out")"; }
   wait_poll_cycle "$state" "$pid" \
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second poll of the expiry phase did not complete: $(cat "$out")"; }
-  printf '  [72/99] analysing' > "$content_file"
+  printf '72.0k' > "$tokens_file"
   wait_poll_cycle "$state" "$pid" \
     || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the advancing poll of the expiry phase did not complete: $(cat "$out")"; }
   wait_poll_cycle "$state" "$pid" \
@@ -5257,10 +5257,6 @@ Working... (350s)'
   pass "a busy marker over a pane that moves nothing across two samples is not reported working, while a moving one still is"
 }
 
-# Deliverable 6's regression, and the shape the 2026-09-11 repeat violated: one
-# declared wait, many polls, a pane hash that churns and settles, exactly one
-# recheck per window. Ported from the controlled reproduction built while
-# investigating that incident, which this HEAD passes.
 # The pure verdict read backs window_is_busy's refusal of a busy claim, so only a
 # recently established `still` may refuse it. The watcher stops sampling a window
 # it no longer reads a pane for, which leaves that window's last verdict on disk;
@@ -5295,6 +5291,10 @@ test_stale_still_verdict_does_not_refuse_a_busy_claim() (
   pass "only a recently established still verdict refuses a busy claim; one older than the maximum gap reads unknown"
 )
 
+# Deliverable 6's regression, and the shape the 2026-09-11 repeat violated: one
+# declared wait, many polls, a pane hash that churns and settles, exactly one
+# recheck per window. Ported from the controlled reproduction built while
+# investigating that incident, which this HEAD passes.
 test_declared_wait_rechecks_once_per_window_across_pane_churn() {
   local dir state fakebin out window key sig round wakes
   dir=$(make_case declared-wait-cadence); state="$dir/state"; fakebin="$dir/fakebin"
