@@ -1,0 +1,25 @@
+## status before any away mode
+away mode: no daemon flag - the away daemon is not running here
+rc=3
+## propose/confirm
+Away posture confirmed at 2026-09-21T10:58:30Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself. Expected return: not given. Spend cap: 4 concurrent workers.
+## start (real daemon, tmux)
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-4164912179-3715764-30096-1789988310', supervising %0
+rc=0
+## status
+away mode: supervising - daemon pid=3716155 holds this home's daemon lock
+rc=0
+## record
+tmux	fm-afk-daemon-4164912179-3715764-30096-1789988310	
+daemon pid=3716155
+    PID    PPID CMD
+3716155 3714999 bash /home/dev/.no-mistakes/worktrees/5480956096ee/01M31RR2SD5D2TEM5T9EWJTG2X/bin/fm-supervise-daemon.sh
+## daemon env harness
+FM_SUPERVISOR_TARGET=%0
+FM_DAEMON_PRIMARY_HARNESS=claude
+FM_SUPERVISOR_BACKEND=tmux
+## kill -9 daemon (simulated reap)
+-rw------- 1 dev dev 11 Sep 21 10:58 /tmp/fm-live-home.owaD64/state/.afk
+## status after reap
+away mode: NOT supervising - state/.afk is present but no live away daemon holds this home's daemon lock; relaunch it with bin/fm-afk-launch.sh start
+rc=1

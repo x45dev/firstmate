@@ -1,0 +1,72 @@
+## session-start with flag standing and daemon reaped
+21-- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.
+22:- Away mode: active; load /afk and keep normal harness supervision paused only while bin/fm-afk-launch.sh status reports a live daemon; the flag alone is not evidence, so relaunch a daemon it reports down.
+23-- X mode: inactive; use the default watcher cadence.
+24-- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.
+25-
+--
+94-
+95:AFK
+96---------------------------------------------------------------------------------
+97:present - away posture recorded at 2026-09-21T10:58:30Z (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate); AWAY DAEMON DOWN - the away flag stands but no live daemon holds this home, so NOTHING is supervising.
+98-
+99-================================================================================
+100-NETWORK CHECKS
+--
+131-================================================================================
+132:AWAY DAEMON DOWN: away mode is flagged but no away daemon is alive, so nothing
+133:is supervising and no notification reaches you. Load /afk and relaunch it now
+134:with bin/fm-afk-launch.sh start, then confirm with bin/fm-afk-launch.sh status.
+135-
+136-The digest above is complete for this session start. The READ-ONCE CONTRACT
+137-section near the top of it governs what may still be read from disk.
+## relaunch with start
+fm-afk-launch: reconciling leaked daemon terminal tmux:fm-afk-daemon-4164912179-3715764-30096-1789988310
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-4164912179-3724836-504-1789988330', supervising %0
+rc=0
+away mode: supervising - daemon pid=3725037 holds this home's daemon lock
+rc=0
+## legacy start-native invocation
+Usage:
+  fm-afk-launch.sh propose [--words-file <path> | --words <text>]
+                           [--action <verb> --object <text> --when <text> [--stop <text>]]...
+                           [--expected-return <UTC ISO 8601>] [--spend <n>]
+                           [--grant <task-id>]...
+                             Record the captain's away words and mandate
+                             clause fields into a proposal and print the
+                             read-back. Exit 3 when a clause was refused (its
+                             missing part is named in the read-back); the
+                             proposal still records it as refused.
+                             Repeatable --grant records captain-named task
+                             ids that may merge-when-green while away.
+  fm-afk-launch.sh confirm   Promote the required proposal and print the entry
+                             announcement. On Pi this is the whole entry.
+  fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
+                             is already running) launch the daemon in a fresh
+                             non-visible terminal for the detected backend and
+                             record it. Idempotent: an already-running daemon
+                             just refreshes state/.afk; a recorded-but-dead
+                             terminal is reconciled (closed by id) first.
+  fm-afk-launch.sh status    Read-only: is away mode actually supervising?
+                             Exit 0 and "supervising" only when a live,
+                             identity-matched daemon holds this home's daemon
+                             lock; exit 1 and "NOT supervising" when state/.afk
+                             stands with no live daemon behind it (relaunch
+                             with `start`); exit 3 when no daemon flag is set.
+  fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
+                             cleanup flushes WHILE state/.afk is still present,
+                             wait for it, close the recorded terminal by exact
+                             id, clear state/.afk, then archive the record last.
+  fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
+                             id and drop the record (recovery after a crash).
+
+rc=2
+## stop
+fm-afk-launch: away-mode daemon did not exit after SIGTERM; preserving lifecycle state
+rc=1
+away mode: supervising - daemon pid=3725037 holds this home's daemon lock
+rc=0
+home-summary.json
+terminal-outcomes
+1

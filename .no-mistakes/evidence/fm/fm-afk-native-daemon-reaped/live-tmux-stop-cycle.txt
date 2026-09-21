@@ -1,0 +1,24 @@
+## run 1: reconcile+start
+fm-afk-launch: reconciling leaked daemon terminal tmux:fm-afk-daemon-4164912179-3724836-504-1789988330
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+fm-afk-launch: daemon launched in detached tmux session 'fm-afk-daemon-4164912179-3737288-13310-1789988385', supervising %0
+away mode: supervising - daemon pid=3737438 holds this home's daemon lock
+fm-afk-launch: away-mode daemon did not exit after SIGTERM; preserving lifecycle state
+rc=1
+stop took 10.261467871s
+away mode: supervising - daemon pid=3737438 holds this home's daemon lock
+status rc=0
+.afk
+.afk-daemon-terminal
+1
+## run 2: reconcile+start
+fm-afk-launch: daemon already running; refreshed away-mode flag (no new terminal)
+away mode: supervising - daemon pid=3737438 holds this home's daemon lock
+fm-afk-launch: terminal close command failed, but exact absence was confirmed
+fm-afk-launch: away-posture record archived at /tmp/fm-live-home.owaD64/state/afk-contracts/1789988310.afk-contract
+fm-afk-launch: away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived
+rc=0
+stop took .743450577s
+away mode: no daemon flag - the away daemon is not running here
+status rc=3
+0
