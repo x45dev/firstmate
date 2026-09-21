@@ -1000,7 +1000,7 @@ wedge_defer() {  # <window> <since-file> <triage-label> <idle-age> <evidence> <d
   wage=$(age_of "$wsf")
   date +%s > "$since_file"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
-    "stale: $win (idle ${age}s, $detail for ${wage}s - the one-hour bound recheck, not a doubt about the evidence)"
+    "stale: $win (idle ${age}s, $detail for ${wage}s - the periodic recheck of deferred progress, not a doubt about the evidence)"
   triage_log "absorbed $label ($evidence since the idle window opened, idle ${age}s): $win"
 }
 
