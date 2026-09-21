@@ -5261,6 +5261,40 @@ Working... (350s)'
 # declared wait, many polls, a pane hash that churns and settles, exactly one
 # recheck per window. Ported from the controlled reproduction built while
 # investigating that incident, which this HEAD passes.
+# The pure verdict read backs window_is_busy's refusal of a busy claim, so only a
+# recently established `still` may refuse it. The watcher stops sampling a window
+# it no longer reads a pane for, which leaves that window's last verdict on disk;
+# a mate that resumes work inside an open turn must not be read through it.
+test_stale_still_verdict_does_not_refuse_a_busy_claim() (
+  local dir state stamp
+  dir=$(make_case aged-still-verdict); state="$dir/state"
+  printf 'window=test:fm-agedstill\nkind=ship\nharness=pi\n' > "$state/agedstill.meta"
+  record_pi_busy "$state" agedstill
+  FM_HOME="$dir/home"; FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+
+  write_still_record() {  # <age-secs>
+    printf 'v1 ts=%s verdict=still footer=a tokens=b lines=c advanced_ts=-\n' \
+      "$(( $(date +%s) - $1 ))" > "$(fm_progress_sample_path "$state" agedstill)"
+  }
+
+  write_still_record 60
+  window_is_busy test:fm-agedstill 'Working...' \
+    && fail "a freshly established still verdict did not refuse the busy claim"
+  [ "$(fm_progress_verdict "$state" agedstill)" = still ] \
+    || fail "a fresh still record did not read still"
+
+  # shellcheck disable=SC2153 # Defined by the sourced progress library.
+  write_still_record $(( FM_PROGRESS_MAX_GAP_SECS + 60 ))
+  [ "$(fm_progress_verdict "$state" agedstill)" = unknown ] \
+    || fail "a still record older than the maximum gap still read still"
+  window_is_busy test:fm-agedstill 'Working...' \
+    || fail "a still verdict from an unrelated earlier episode refused a live busy claim"
+  pass "only a recently established still verdict refuses a busy claim; one older than the maximum gap reads unknown"
+)
+
 test_declared_wait_rechecks_once_per_window_across_pane_churn() {
   local dir state fakebin out window key sig round wakes
   dir=$(make_case declared-wait-cadence); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5480,5 +5514,6 @@ test_completed_crew_is_not_wedge_escalated_but_a_failed_one_is
 test_busy_pane_past_the_turn_bound_still_escalates_in_a_crew_reading_done
 test_retired_endpoint_stops_before_reading_a_pane
 test_stale_busy_marker_over_an_unmoving_pane_is_not_reported_working
+test_stale_still_verdict_does_not_refuse_a_busy_claim
 test_declared_wait_rechecks_once_per_window_across_pane_churn
 test_resurface_records_an_anchor_that_moved

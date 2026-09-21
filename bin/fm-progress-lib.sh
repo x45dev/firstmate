@@ -210,12 +210,18 @@ _fm_progress_advanced_ts() {  # <record>
 
 # The verdict the last completed observation recorded, without sampling: a pure
 # read for every consumer in a poll other than the one that took the sample.
-# Always one of the four verdicts, so an absent, malformed, or pre-verdict
-# record reads unknown and licenses nothing.
+# Always one of the four verdicts, so an absent, malformed, pre-verdict, or
+# stale record reads unknown and licenses nothing. A record older than the
+# maximum gap describes an unrelated episode, the same rule observation applies
+# to its own anchor, and a task the watcher no longer samples leaves its last
+# verdict on disk indefinitely.
 fm_progress_verdict() {  # <state-dir> <id>
-  local record stored
+  local record stored ts
   record=$(cat "$(fm_progress_sample_path "$1" "$2")" 2>/dev/null || true)
   case "$record" in 'v1 ts='*) ;; *) printf 'unknown'; return 0 ;; esac
+  ts=$(_fm_progress_field "$record" ts) || ts=''
+  case "$ts" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  [ $(( $(date +%s) - ts )) -le "$FM_PROGRESS_MAX_GAP_SECS" ] || { printf 'unknown'; return 0; }
   stored=$(_fm_progress_field "$record" verdict) || stored=''
   case "$stored" in
     advanced|alive|still) printf '%s' "$stored" ;;

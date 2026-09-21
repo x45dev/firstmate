@@ -216,6 +216,16 @@ sed -i "s/ ts=[0-9]*/ ts=$(( $(date +%s) - FM_PROGRESS_MAX_GAP_SECS - 60 ))/" "$
   || fail "a sample older than the maximum gap must be discarded, not compared"
 pass "a sample past the maximum gap reports unknown and re-anchors"
 
+# --- a record from an unrelated episode licenses nothing ----------------------
+
+observe_pair aged "$DEAD" "$DEAD" > /dev/null
+[ "$(fm_progress_verdict "$STATE" aged)" = still ] \
+  || fail "setup: expected a fresh still record"
+age_anchor aged $(( FM_PROGRESS_MAX_GAP_SECS + 60 ))
+[ "$(fm_progress_verdict "$STATE" aged)" = unknown ] \
+  || fail "a verdict older than the maximum gap must read unknown through the pure read"
+pass "the pure read reports unknown for a verdict older than the maximum gap"
+
 # --- the pure read licenses nothing without a record ------------------------
 
 fm_progress_sample_clear "$STATE" nored
@@ -224,7 +234,7 @@ fm_progress_sample_clear "$STATE" nored
 printf 'garbage\n' > "$(fm_progress_sample_path "$STATE" nored)"
 [ "$(fm_progress_verdict "$STATE" nored)" = unknown ] \
   || fail "a malformed record must read unknown"
-printf 'v1 ts=1 verdict=busy elapsed=a tokens=b lines=c\n' \
+printf 'v1 ts=%s verdict=busy elapsed=a tokens=b lines=c\n' "$(date +%s)" \
   > "$(fm_progress_sample_path "$STATE" nored)"
 [ "$(fm_progress_verdict "$STATE" nored)" = unknown ] \
   || fail "a record carrying an unrecognised verdict must read unknown"
