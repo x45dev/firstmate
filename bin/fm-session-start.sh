@@ -749,6 +749,10 @@ fi
 stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
+# The flag is never the evidence: a harness can reap the daemon and leave the
+# flag standing, so whether anything is supervising is read from a live daemon.
+AFK_DAEMON_LIVE=0
+fm_afk_daemon_owns_supervision "$STATE" && AFK_DAEMON_LIVE=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
@@ -878,13 +882,17 @@ subsection "AFK"
 if [ -f "$STATE/.afk-contract" ]; then
   printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
     "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
-  if [ -e "$STATE/.afk" ]; then
+  if [ "$AFK_DAEMON_LIVE" -eq 1 ]; then
     printf '; the away daemon owns the watcher.\n'
+  elif [ -e "$STATE/.afk" ]; then
+    printf '; AWAY DAEMON DOWN - the away flag stands but no live daemon holds this home, so NOTHING is supervising.\n'
   else
     printf '; no daemon runs, the ordinary supervision session continues.\n'
   fi
-elif [ -e "$STATE/.afk" ]; then
+elif [ "$AFK_DAEMON_LIVE" -eq 1 ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
+elif [ -e "$STATE/.afk" ]; then
+  printf 'present - AWAY DAEMON DOWN - the away flag stands but no live daemon holds this home, so NOTHING is supervising (legacy flag with no posture record).\n'
 else
   printf 'absent\n'
 fi
@@ -947,6 +955,13 @@ if [ "$READ_ONLY" -eq 1 ]; then
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
+
+EOF
+elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_DAEMON_LIVE" -eq 0 ]; then
+  cat <<'EOF'
+AWAY DAEMON DOWN: away mode is flagged but no away daemon is alive, so nothing
+is supervising and no notification reaches you. Load /afk and relaunch it now
+with bin/fm-afk-launch.sh start, then confirm with bin/fm-afk-launch.sh status.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then

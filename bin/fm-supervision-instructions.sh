@@ -210,7 +210,7 @@ else
   printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
 fi
 if [ "$AFK" -eq 1 ]; then
-  printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
+  printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused only while bin/fm-afk-launch.sh status reports a live daemon; the flag alone is not evidence, so relaunch a daemon it reports down.'
 else
   printf '%s\n' '- Away mode: inactive.'
 fi

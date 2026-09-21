@@ -15,20 +15,28 @@
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. Every other harness still runs the daemon
-# for now, so `start` and `start-native` require the confirmed record before they
-# launch the daemon.
+# for now, so `start` requires the confirmed record before it launches the
+# daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
-# terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
-# by SPLITTING the captain's active pane visibly shrinks it - the regression this
-# script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
-# workspace with --no-focus, or a detached tmux session) that never touches the
-# captain's active tab, and NEVER uses shell `&` (which herdr/codex can reap).
+# terminal it is already in, so the daemon lives exactly as long as that
+# terminal. A harness-hosted background job (claude's background bash, grok's
+# background tool) is NOT a safe host: the harness reaps it under its own
+# memory accounting, not the kernel's, and state/.afk then outlives the daemon
+# so away mode reads active with nothing supervising. `start-native`, the old
+# harness-hosted route, therefore refuses. Every daemon-running harness uses
+# `start`, which creates a non-visible tracked terminal the harness does not
+# own (a herdr tab/workspace with --no-focus, or a detached tmux session),
+# never splits the captain's active tab, and NEVER uses shell `&` (which
+# herdr/codex can reap).
+#
+# The flag is never the evidence: `status` answers "is away mode supervising"
+# from a live, identity-matched daemon holding this home's daemon lock
+# (fm_afk_daemon_owns_supervision in bin/fm-wake-lib.sh), and reports a flag
+# with no live daemon as NOT supervising.
 #
 # Correct supervisor targeting: the daemon finds the captain pane to inject into
 # from its OWN inherited env (discover_supervisor_target). Running it in a
@@ -57,8 +65,15 @@
 #                              just refreshes state/.afk; a recorded-but-dead
 #                              terminal is reconciled (closed by id) first.
 #   fm-afk-launch.sh start-native
-#                              Prepare lifecycle state for a harness-native
-#                              background job and record that no terminal exists.
+#                              Refuses: a harness-hosted background job is reaped
+#                              by the harness, leaving the flag with no daemon.
+#                              Use `start`.
+#   fm-afk-launch.sh status    Read-only: is away mode actually supervising?
+#                              Exit 0 and "supervising" only when a live,
+#                              identity-matched daemon holds this home's daemon
+#                              lock; exit 1 and "NOT supervising" when state/.afk
+#                              stands with no live daemon behind it (relaunch
+#                              with `start`); exit 3 when no daemon flag is set.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -268,6 +283,8 @@ fm_afk_launch_record_read() {
   case "$FM_AFK_REC_BACKEND" in
     herdr) [ -n "$extra" ] ;;
     tmux) : ;;
+    # A record left by the retired start-native route: no terminal to close,
+    # still readable so stop and reconcile can retire it.
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
@@ -611,46 +628,28 @@ fm_afk_launch_start() {
   return "$result"
 }
 
+# The harness-hosted route is retired: see the header. It refuses before
+# touching any state so a stale instruction cannot recreate the half-dead flag.
 fm_afk_launch_start_native() {
-  local backup artifact had_afk=0 result=0
-  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  fm_afk_launch_catchup_pending && return 1
-  fm_afk_launch_daemon_allowed || return 1
-  fm_afk_launch_record_require || return 1
-  if daemon_lock_held_by_live_daemon; then
-    fm_afk_launch_record_validate_if_present || return 1
-    fm_afk_launch_flag_write || return 1
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag"
+  fm_afk_launch_log "start-native is retired: a harness-hosted background job is reaped by the harness and leaves state/.afk with no daemon behind it; run bin/fm-afk-launch.sh start"
+  return 1
+}
+
+# Read-only answer to "is away mode supervising", derived from the daemon being
+# alive, never from state/.afk existing.
+fm_afk_launch_status() {
+  local pid
+  if fm_afk_daemon_owns_supervision "$FM_AFK_LAUNCH_STATE"; then
+    pid=$(cat "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock/pid" 2>/dev/null || true)
+    printf "away mode: supervising - daemon pid=%s holds this home's daemon lock\n" "$pid"
     return 0
   fi
-  backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
-  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
-    had_afk=1
-    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    printf "away mode: NOT supervising - state/.afk is present but no live away daemon holds this home's daemon lock; relaunch it with bin/fm-afk-launch.sh start\n"
+    return 1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
-    if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
-      cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
-    fi
-  done
-  fm_afk_launch_reconcile || result=1
-  if [ "$result" -eq 0 ]; then
-    if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
-      fm_afk_launch_log "failed to clear stale away-mode artifacts"
-      result=1
-    elif ! fm_afk_launch_flag_write; then
-      result=1
-    fi
-  fi
-  if [ "$result" -eq 0 ]; then
-    fm_afk_launch_record_write none - native || result=1
-  fi
-  if [ "$result" -ne 0 ]; then
-    fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
-  else
-    rm -rf "$backup" || result=1
-  fi
-  return "$result"
+  printf 'away mode: no daemon flag - the away daemon is not running here\n'
+  return 3
 }
 
 fm_afk_launch_stop() {
@@ -723,6 +722,9 @@ fm_afk_launch_main() {
   # the lock directory, which then blocks the next away-mode launch until the
   # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
   # a lock this process owns, so arming it before acquisition is safe.
+  # status is read-only and must answer even while another launcher holds the
+  # lock, so it runs before acquisition.
+  [ "${1:-}" = status ] && { fm_afk_launch_status; return; }
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -732,6 +734,7 @@ fm_afk_launch_main() {
     confirm) fm_afk_launch_confirm ;;
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
+    status) fm_afk_launch_status ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
     -h|--help|help) fm_afk_launch_usage ;;
