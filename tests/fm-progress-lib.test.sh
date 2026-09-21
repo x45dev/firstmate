@@ -373,13 +373,4 @@ FM_PROGRESS_LATCH_MAX_SECS=240 fm_progress_advancing "$STATE" precompat \
   && fail "a record written before the latch existed deferred a wedge"
 pass "a pre-latch record carries no advance and defers nothing"
 
-# Zero disables the latch, leaving exactly the single-pair question every caller
-# asked before it existed - the setting that takes the new behaviour back out.
-observe_pair unlatched "$(capture 'step 1' '  ↑ 1.2k')" "$(capture 'step 2' '  ↑ 3.4k')" > /dev/null
-age_anchor unlatched 60
-fm_progress_observe "$STATE" unlatched "$(capture 'step 2' '  ↑ 3.4k xx')" > /dev/null
-FM_PROGRESS_LATCH_MAX_SECS=0 fm_progress_advancing "$STATE" unlatched \
-  && fail "a zero ceiling still answered from the latch rather than the last pair"
-pass "a zero ceiling restores the pre-latch single-pair question"
-
 fm_test_cleanup

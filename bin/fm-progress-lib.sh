@@ -111,10 +111,8 @@ case "$FM_PROGRESS_MAX_GAP_SECS" in ''|*[!0-9]*|0) FM_PROGRESS_MAX_GAP_SECS=1800
 # evidence, and a pane that moved once and then froze escalates like any other.
 # It matches bin/fm-watch.sh's STALE_ESCALATE_SECS by default for exactly that
 # reason - the latch covers the window being judged and not one second more.
-# Zero disables the latch, leaving only the immediately preceding sample pair,
-# which is the behaviour every caller had before the latch existed.
 FM_PROGRESS_LATCH_MAX_SECS=${FM_PROGRESS_LATCH_MAX_SECS:-240}
-case "$FM_PROGRESS_LATCH_MAX_SECS" in ''|*[!0-9]*) FM_PROGRESS_LATCH_MAX_SECS=240 ;; esac
+case "$FM_PROGRESS_LATCH_MAX_SECS" in ''|*[!0-9]*|0) FM_PROGRESS_LATCH_MAX_SECS=240 ;; esac
 
 fm_progress_sample_path() {  # <state-dir> <id>
   printf '%s/%s.progress-sample' "$1" "$2"
@@ -324,10 +322,6 @@ fm_progress_advanced_age() {  # <state-dir> <id>
 # time after the movement actually stops.
 fm_progress_advancing() {  # <state-dir> <id>
   local age
-  [ "$FM_PROGRESS_LATCH_MAX_SECS" -gt 0 ] 2>/dev/null || {
-    [ "$(fm_progress_verdict "$1" "$2")" = advanced ]
-    return
-  }
   age=$(fm_progress_advanced_age "$1" "$2")
   [ "$age" != - ] || return 1
   [ "$age" -le "$FM_PROGRESS_LATCH_MAX_SECS" ]

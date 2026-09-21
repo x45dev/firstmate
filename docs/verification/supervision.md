@@ -288,7 +288,7 @@ ok - one declared wait rechecks exactly once per window across eight polls and a
 ok - a working run carries its own step-activity recency, and a run with no active step never reads as recent
 ```
 
-`tests/fm-progress-lib.test.sh` reported 25 passing assertions with no failures on that run, and the listed `tests/fm-watch-triage.test.sh` assertions were run individually.
+`tests/fm-progress-lib.test.sh` reported 24 passing assertions with no failures on that run, and the listed `tests/fm-watch-triage.test.sh` assertions were run individually.
 
 The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in three directions - a running turn must not read `still`, a settled pane must never read `advanced` and must reach `still`, and a hung foreground command must never read `advanced` across the latch window.
 That guard passed against claude in all three directions on 2026-09-21, recorded verbatim in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence"); the other harnesses are not run there because this fleet dispatches only claude.
