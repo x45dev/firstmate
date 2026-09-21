@@ -4850,6 +4850,10 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 # takes the second sample of a comparable pair rather than a first sight. Built
 # through the library's own public counters, so a test can never encode a
 # counter format the library does not actually read.
+#
+# It deliberately writes no advanced_ts, which also makes it the fixture for a
+# record written before that field existed: such a record carries no advance, so
+# it defers nothing. Do not add the field here without replacing that coverage.
 seed_progress_sample() {  # <state> <id> <prior-capture> [age-secs]
   local state=$1 id=$2 prior=$3 age=${4:-60} counters footer tokens content
   counters=$(fm_progress_counters "$prior")
@@ -4886,58 +4890,169 @@ arm_wedge_window() {  # <state> <key> <pane-text> <idle-secs>
   set_mtime "$back" "$state/.stale-since-$key"
 }
 
-# Class 1 and 2, in both directions. A worker whose rendered output is advancing
-# is not a wedge however long its turn has run; a worker whose only moving part
-# is its own clock is exactly the case the bound exists to catch, and a hung
-# foreground call ticks a clock in precisely the same way.
+# A pane that redraws its own status line faster than the watcher polls, which
+# is what every live harness actually does, with its rendered CONTENT held in a
+# separate file the test advances. Running the clock independently of the test
+# is what makes these phases deterministic: every poll sees a moving footer, so
+# the pane is never momentarily `still`, and the only thing that can record an
+# advance is the test moving the content.
+start_pane_ticker() {  # <capture-file> <content-file> <stop-file>
+  local capture=$1 content=$2 stop=$3
+  : > "$stop"
+  (
+    i=0
+    while [ -e "$stop" ]; do
+      i=$(( i + 1 ))
+      progress_pane "$(cat "$content" 2>/dev/null || printf '  [39/99] analysing')" \
+        "Working... (${i}s)" > "$capture.tmp"
+      mv -f "$capture.tmp" "$capture"
+      command sleep 0.2
+    done
+  ) >/dev/null 2>&1 & echo $!
+}
+
+stop_pane_ticker() {  # <pid> <stop-file>
+  rm -f "$2"
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+# Arm a busy over-age window whose wedge timer is ALREADY past its threshold, so
+# the next poll runs the at-threshold branch without the test having to predict
+# how long the preceding polls took. Separating the moment of judgement from the
+# sampling is what keeps these phases deterministic: the movement evidence is
+# built by real polls over a real moving pane, and only the judgement is placed.
+fire_wedge_next_poll() {  # <state> <key> <escalate-secs>
+  local back
+  back=$(( $(date +%s) - $3 - 5 ))
+  echo "$back" > "$1/.stale-since-$2"
+  set_mtime "$back" "$1/.stale-since-$2"
+}
+
+# Class 1 and 2, in both directions, on the busy over-age path - the only caller
+# that reaches the wedge timer with a pane whose bytes are still changing, and so
+# the only one where measured movement can be the thing under test.
+#
+# The shape both phases model is the one every real worker has: the harness
+# redraws its own status line on every poll while the work itself renders more
+# slowly than the poll interval. Read one sample pair at a time that worker is
+# `alive` on most polls and `advanced` on a few, so judging it by the last pair
+# alone is a coin flip on when the threshold happens to land. The latch is what
+# makes the answer hold across the window being judged - and the ceiling is what
+# stops it holding one second longer than that, which is the whole difference
+# between deferring a working pane and going blind on a dead one.
+#
+# Both phases assert on the recorded ADVANCE rather than on the verdict of
+# whichever pair a poll happened to take last: the advance is the durable half
+# and the verdict is transient, so reading the verdict would put a race in the
+# test that is not in the behaviour.
 test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
-  local dir state fakebin out capture_file window key pid prior now_pane sig
+  local dir state fakebin out capture_file content_file stop_file window key
+  local pid ticker sig adv_first adv_later
   dir=$(make_case wedge-measured-progress); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-progressing"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/progressing.meta"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  content_file="$dir/content.txt"; stop_file="$dir/ticking"
+  window="test:fm-progressing"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/progressing.meta"
+  record_pi_busy "$state" progressing
   printf 'working: analysing\n' > "$state/progressing.status"
   sig=$(seen_sig "$state/progressing.status"); printf '%s' "$sig" > "$state/.seen-progressing_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_mtime $(( $(date +%s) - 4000 )) "$state/progressing.turn-ended"
+  prime_turnend_seen "$state/progressing.turn-ended"
 
-  # Phase A: the analysis pass the captain watched advance from 39 to 60 of 99
-  # while the footer sat unchanged past the one-hour mark. Content moved, so the
-  # escalation is deferred.
-  prior=$(progress_pane '  [39/99] analysing' 'Working... (3601s)')
-  now_pane=$(progress_pane '  [60/99] analysing' 'Working... (3601s)')
-  printf '%s' "$now_pane" > "$capture_file"
-  arm_wedge_window "$state" "$key" "$now_pane" 500
-  seed_progress_sample "$state" progressing "$prior"
+  # Phase A: the analysis pass the captain watched advance from 39 to 60 of 99.
+  # Its content moves once, several polls before the threshold, and only the
+  # turn timer moves after that - so the pair the threshold poll reads is not an
+  # advance, and only the latched one defers it.
+  printf '  [39/99] analysing' > "$content_file"
+  ticker=$(start_pane_ticker "$capture_file" "$content_file" "$stop_file")
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=240 FM_PROGRESS_MIN_GAP_SECS=0 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_STALE_ESCALATE_SECS=60 FM_PROGRESS_MIN_GAP_SECS=0 FM_PROGRESS_LATCH_MAX_SECS=600 \
+    FM_PAUSE_RESURFACE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "a worker whose rendered output advanced was wedge-escalated: $(cat "$out")"
-  fi
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "measured progress still enqueued a wedge wake"; }
-  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "measured progress advanced the escalation counter"; }
-  [ -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "the progress deferral did not open a bounded recheck window"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first poll did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second poll did not complete: $(cat "$out")"; }
+  # The content advance, measured by the watcher over a live pane rather than
+  # placed on disk for it.
+  printf '  [60/99] analysing' > "$content_file"
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the advancing poll did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the poll after the advance did not complete: $(cat "$out")"; }
+  adv_first=$(fm_progress_advanced_age "$state" progressing)
+  [ "$adv_first" != - ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the watcher did not measure the content advance as progress"; }
+  # Several more polls of the turn timer alone. The advance must survive them,
+  # which is the whole point, and must NOT be refreshed by them, which is what
+  # keeps the ceiling meaningful.
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first footer-only poll did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second footer-only poll did not complete: $(cat "$out")"; }
+  adv_later=$(fm_progress_advanced_age "$state" progressing)
+  [ "$adv_later" != - ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the measured advance was lost across the footer-only polls"; }
+  [ "$adv_later" -gt "$adv_first" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "a footer-only redraw was recorded as fresh progress (the ceiling can never expire)"; }
+  fire_wedge_next_poll "$state" "$key" 60
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the threshold poll did not complete: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "a worker advancing more slowly than one poll was wedge-escalated: $(cat "$out")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "measured progress advanced the escalation counter"; }
+  [ -e "$state/.writing-since-$key" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the progress deferral did not open a bounded recheck window"; }
+  stop_pane_ticker "$ticker" "$stop_file"
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional progress-deferral stop"
 
-  # Phase B: the identical fixture with ONLY the turn timer moving. A dead
-  # foreground call and a live one look the same here, so the bound still fires.
-  prior=$(progress_pane '  [60/99] analysing' 'Working... (3601s)')
-  now_pane=$(progress_pane '  [60/99] analysing' 'Working... (3661s)')
-  printf '%s' "$now_pane" > "$capture_file"
-  rm -f "$state/.writing-since-$key" "$state/.writing-resurfaced-$key"
-  arm_wedge_window "$state" "$key" "$now_pane" 500
-  seed_progress_sample "$state" progressing "$prior"
+  # Phase B: the same worker after its progress stops - a dead agent behind a
+  # harness that still redraws, and the shape a foreground sleep leaves behind.
+  # The advance is real and on record; it is simply older than the window being
+  # judged, and an advance that outlives its window is history, not evidence.
+  rm -f "$state/.writing-since-$key" "$state/.writing-resurfaced-$key" \
+    "$state/.wedge-escalations-$key" "$state/.stale-since-$key"
+  fm_progress_sample_clear "$state" progressing
+  printf '  [60/99] analysing' > "$content_file"
+  ticker=$(start_pane_ticker "$capture_file" "$content_file" "$stop_file")
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=240 FM_PROGRESS_MIN_GAP_SECS=0 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_STALE_ESCALATE_SECS=60 FM_PROGRESS_MIN_GAP_SECS=0 FM_PROGRESS_LATCH_MAX_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS=999 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "a pane whose only moving part was its own clock did not wedge-escalate"
-  grep -F "possible wedge" "$out" >/dev/null || fail "the ticking-clock escalation did not flag a possible wedge"
-  pass "a worker whose rendered output advances is not wedge-escalated, while one whose only moving part is its clock still is"
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first poll of the expiry phase did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second poll of the expiry phase did not complete: $(cat "$out")"; }
+  printf '  [72/99] analysing' > "$content_file"
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the advancing poll of the expiry phase did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the poll after the expiry-phase advance did not complete: $(cat "$out")"; }
+  [ "$(fm_progress_advanced_age "$state" progressing)" != - ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the expiry phase never recorded an advance to expire"; }
+  # Footer-only polls for longer than this phase's one-second ceiling.
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first footer-only poll of the expiry phase did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second footer-only poll of the expiry phase did not complete: $(cat "$out")"; }
+  fire_wedge_next_poll "$state" "$key" 60
+  if ! wait_for_exit "$pid" 200; then
+    stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"
+    fail "an advance older than the ceiling still deferred the wedge (the latch has no ceiling): $(cat "$out")"
+  fi
+  stop_pane_ticker "$ticker" "$stop_file"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the expired-latch escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a measured advance defers the wedge across the window being judged, and stops deferring it once the advance is older than that window"
 }
 
 # Class 4, in both directions. A validation run parked on a remote service

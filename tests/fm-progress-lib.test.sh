@@ -176,4 +176,70 @@ pass "a clock-form timer and a footer notation nothing models both read as movem
   || fail "an arrow-form context counter must be readable as progress"
 pass "an arrow-form context counter reads as advanced"
 
+# --- the advance latch ------------------------------------------------------
+
+# Age the advance on record without touching anything else, so the ceiling can
+# be tested at a real boundary rather than by waiting out a real one.
+age_advance() {  # <id> <secs>
+  local path stamp
+  path=$(fm_progress_sample_path "$STATE" "$1")
+  stamp=$(( $(date +%s) - $2 ))
+  sed -i "s/ advanced_ts=[0-9]*/ advanced_ts=$stamp/" "$path"
+}
+
+# Age the ANCHOR, so the next observation clears the minimum gap and actually
+# compares rather than reporting unknown and leaving the record alone.
+age_anchor() {  # <id> <secs>
+  local path stamp
+  path=$(fm_progress_sample_path "$STATE" "$1")
+  stamp=$(( $(date +%s) - $2 ))
+  sed -i "s/ ts=[0-9]*/ ts=$stamp/" "$path"
+}
+
+# A wedge is asked about a whole quiet window, while one sample pair only ever
+# describes the gap between two polls. A worker rendering more slowly than the
+# poll interval is therefore `alive` on most pairs and `advanced` on a few, so
+# the last pair alone cannot answer the question the wedge timer is asking.
+# The latch is what carries the answer across the window.
+observe_pair latched "$(capture 'step 1' '  ↑ 1.2k')" "$(capture 'step 2' '  ↑ 3.4k')" > /dev/null
+[ "$(fm_progress_verdict "$STATE" latched)" = advanced ] \
+  || fail "the fixture did not establish an advance to latch"
+age_anchor latched 60
+fm_progress_observe "$STATE" latched "$(capture 'step 2' '  ↑ 3.4k xx')" > /dev/null
+[ "$(fm_progress_verdict "$STATE" latched)" = alive ] \
+  || fail "a footer-only redraw after an advance must read alive"
+FM_PROGRESS_LATCH_MAX_SECS=240 fm_progress_advancing "$STATE" latched \
+  || fail "an advance moments old stopped answering the wedge question after one alive poll"
+pass "a measured advance survives the alive polls between it and the threshold"
+
+# And the ceiling: past the window being judged, the same advance answers
+# nothing. Without this the latch trades a false alarm for a permanent silence,
+# which is the expensive direction the whole change exists to close.
+age_advance latched 241
+FM_PROGRESS_LATCH_MAX_SECS=240 fm_progress_advancing "$STATE" latched \
+  && fail "an advance older than the window being judged still deferred a wedge"
+age_advance latched 239
+FM_PROGRESS_LATCH_MAX_SECS=240 fm_progress_advancing "$STATE" latched \
+  || fail "an advance inside the window being judged stopped deferring"
+pass "the latch expires a bounded time after the movement itself stops"
+
+# A record written before the field existed carries no advance, so it defers
+# nothing. Absence of evidence stays absence of evidence in this direction too.
+printf 'v1 ts=%s verdict=advanced footer=a tokens=b content=c\n' "$(date +%s)" \
+  > "$(fm_progress_sample_path "$STATE" precompat)"
+[ "$(fm_progress_advanced_age "$STATE" precompat)" = - ] \
+  || fail "a record with no advance on it reported one"
+FM_PROGRESS_LATCH_MAX_SECS=240 fm_progress_advancing "$STATE" precompat \
+  && fail "a record written before the latch existed deferred a wedge"
+pass "a pre-latch record carries no advance and defers nothing"
+
+# Zero disables the latch, leaving exactly the single-pair question every caller
+# asked before it existed - the setting that takes the new behaviour back out.
+observe_pair unlatched "$(capture 'step 1' '  ↑ 1.2k')" "$(capture 'step 2' '  ↑ 3.4k')" > /dev/null
+age_anchor unlatched 60
+fm_progress_observe "$STATE" unlatched "$(capture 'step 2' '  ↑ 3.4k xx')" > /dev/null
+FM_PROGRESS_LATCH_MAX_SECS=0 fm_progress_advancing "$STATE" unlatched \
+  && fail "a zero ceiling still answered from the latch rather than the last pair"
+pass "a zero ceiling restores the pre-latch single-pair question"
+
 fm_test_cleanup

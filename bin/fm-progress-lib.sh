@@ -43,7 +43,16 @@
 #
 # Sample record: state/<id>.progress-sample - exactly one line, replaced whole:
 #
-#   v1 ts=<epoch> verdict=<v> footer=<digest|-> tokens=<digest|-> content=<digest|->
+#   v1 ts=<epoch> verdict=<v> footer=<digest|-> tokens=<digest|-> content=<digest|-> advanced_ts=<epoch|->
+#
+# advanced_ts is the last time the pair read `advanced`, carried forward across
+# every later observation that did not. It exists because the wedge question is
+# asked about a whole quiet window while one observation only ever describes the
+# gap between two polls: a worker rendering more slowly than the poll interval
+# reads `alive` on most individual pairs and `advanced` on a few, and reading
+# only the last pair turns that steady progress into a coin flip. A record
+# written before this field existed carries none, which reads as no advance on
+# record and defers nothing - the safe direction.
 #
 # The verdict is stored beside the counters so the pair is established exactly
 # once per poll, by the caller that already holds a capture, and every other
@@ -72,6 +81,17 @@ case "$FM_PROGRESS_MIN_GAP_SECS" in ''|*[!0-9]*) FM_PROGRESS_MIN_GAP_SECS=5 ;; e
 # an unrelated earlier episode answers nothing about this one.
 FM_PROGRESS_MAX_GAP_SECS=${FM_PROGRESS_MAX_GAP_SECS:-1800}
 case "$FM_PROGRESS_MAX_GAP_SECS" in ''|*[!0-9]*|0) FM_PROGRESS_MAX_GAP_SECS=1800 ;; esac
+
+# The longest a measured advance keeps answering the wedge question after the
+# movement itself stops. A wedge is asked about one quiet window, so the answer
+# may not outlive that window: past this bound an advance is history rather than
+# evidence, and a pane that moved once and then froze escalates like any other.
+# It matches bin/fm-watch.sh's STALE_ESCALATE_SECS by default for exactly that
+# reason - the latch covers the window being judged and not one second more.
+# Zero disables the latch, leaving only the immediately preceding sample pair,
+# which is the behaviour every caller had before the latch existed.
+FM_PROGRESS_LATCH_MAX_SECS=${FM_PROGRESS_LATCH_MAX_SECS:-240}
+case "$FM_PROGRESS_LATCH_MAX_SECS" in ''|*[!0-9]*) FM_PROGRESS_LATCH_MAX_SECS=240 ;; esac
 
 fm_progress_sample_path() {  # <state-dir> <id>
   printf '%s/%s.progress-sample' "$1" "$2"
@@ -134,15 +154,25 @@ _fm_progress_field() {  # <record> <key>
   printf '%s' "${rest%% *}"
 }
 
-_fm_progress_write() {  # <path> <epoch> <verdict> <counters>
-  local path=$1 now=$2 verdict=$3 counters=$4 footer tokens content tmp
+_fm_progress_write() {  # <path> <epoch> <verdict> <counters> <advanced-ts|->
+  local path=$1 now=$2 verdict=$3 counters=$4 advanced=${5:--} footer tokens content tmp
   footer=${counters%%$'\t'*}
   content=${counters##*$'\t'}
   tokens=${counters#*$'\t'}; tokens=${tokens%%$'\t'*}
   tmp="$path.tmp.$$"
-  printf 'v1 ts=%s verdict=%s footer=%s tokens=%s content=%s\n' \
-    "$now" "$verdict" "$footer" "$tokens" "$content" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  printf 'v1 ts=%s verdict=%s footer=%s tokens=%s content=%s advanced_ts=%s\n' \
+    "$now" "$verdict" "$footer" "$tokens" "$content" "$advanced" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# The epoch of the last measured advance on record, or `-` when there is none.
+# Reads as `-` for a record written before the field existed, which is what
+# makes the latch add deferral only where an advance was actually observed.
+_fm_progress_advanced_ts() {  # <record>
+  local stored
+  case "$1" in 'v1 ts='*) ;; *) printf '%s' -; return 0 ;; esac
+  stored=$(_fm_progress_field "$1" advanced_ts) || stored=''
+  case "$stored" in ''|*[!0-9]*) printf '%s' - ;; *) printf '%s' "$stored" ;; esac
 }
 
 # The verdict the last completed observation recorded, without sampling: a pure
@@ -166,7 +196,7 @@ fm_progress_verdict() {  # <state-dir> <id>
 # no backend, no worktree walk, and no pipeline call, so a caller already
 # holding a pane capture pays nothing beyond it.
 fm_progress_observe() {  # <state-dir> <id> <tail>
-  local state=$1 id=$2 tail=$3 path record now ts gap counters verdict
+  local state=$1 id=$2 tail=$3 path record now ts gap counters verdict advanced
   local prev_footer prev_tokens prev_content footer tokens content
   [ -n "$id" ] || { printf 'unknown'; return 0; }
   path=$(fm_progress_sample_path "$state" "$id")
@@ -177,11 +207,14 @@ fm_progress_observe() {  # <state-dir> <id> <tail>
   tokens=${counters#*$'\t'}; tokens=${tokens%%$'\t'*}
 
   record=$(cat "$path" 2>/dev/null || true)
+  # Carried forward through every write below, so a stretch of `alive` polls
+  # between two advances does not erase the advance that came before them.
+  advanced=$(_fm_progress_advanced_ts "$record")
   case "$record" in
     'v1 ts='*) ts=$(_fm_progress_field "$record" ts) || ts='' ;;
     *) ts='' ;;
   esac
-  case "$ts" in ''|*[!0-9]*) _fm_progress_write "$path" "$now" unknown "$counters" || true; printf 'unknown'; return 0 ;; esac
+  case "$ts" in ''|*[!0-9]*) _fm_progress_write "$path" "$now" unknown "$counters" "$advanced" || true; printf 'unknown'; return 0 ;; esac
   gap=$(( now - ts ))
   if [ "$gap" -lt "$FM_PROGRESS_MIN_GAP_SECS" ]; then
     # Too close to compare. Keep the older anchor, and the verdict it already
@@ -191,7 +224,7 @@ fm_progress_observe() {  # <state-dir> <id> <tail>
     return 0
   fi
   if [ "$gap" -gt "$FM_PROGRESS_MAX_GAP_SECS" ]; then
-    _fm_progress_write "$path" "$now" unknown "$counters" || true
+    _fm_progress_write "$path" "$now" unknown "$counters" "$advanced" || true
     printf 'unknown'
     return 0
   fi
@@ -199,7 +232,7 @@ fm_progress_observe() {  # <state-dir> <id> <tail>
   prev_tokens=$(_fm_progress_field "$record" tokens) || prev_tokens=''
   prev_content=$(_fm_progress_field "$record" content) || prev_content=''
   if [ -z "$prev_footer" ] || [ -z "$prev_tokens" ] || [ -z "$prev_content" ]; then
-    _fm_progress_write "$path" "$now" unknown "$counters" || true
+    _fm_progress_write "$path" "$now" unknown "$counters" "$advanced" || true
     printf 'unknown'
     return 0
   fi
@@ -215,6 +248,39 @@ fm_progress_observe() {  # <state-dir> <id> <tail>
   else
     verdict=still
   fi
-  _fm_progress_write "$path" "$now" "$verdict" "$counters" || true
+  [ "$verdict" != advanced ] || advanced=$now
+  _fm_progress_write "$path" "$now" "$verdict" "$counters" "$advanced" || true
   printf '%s' "$verdict"
+}
+
+# Seconds since the last measured advance, or `-` when none is on record. A
+# pure read, like fm_progress_verdict: it establishes nothing and samples
+# nothing, so every consumer in a poll gets the answer the sampling caller
+# already recorded.
+fm_progress_advanced_age() {  # <state-dir> <id>
+  local record stamp
+  record=$(cat "$(fm_progress_sample_path "$1" "$2")" 2>/dev/null || true)
+  stamp=$(_fm_progress_advanced_ts "$record")
+  [ "$stamp" != - ] || { printf '%s' -; return 0; }
+  printf '%s' "$(( $(date +%s) - stamp ))"
+}
+
+# 0 iff a measured advance is recent enough to still answer the wedge question
+# for the window being judged - the latched form of the `advanced` verdict, and
+# the one a wedge caller wants. Asking for the verdict of the last sample pair
+# alone answers a different and much narrower question: whether the worker
+# happened to render something in the final poll interval before the threshold.
+# A worker advancing on a cadence slower than the poll reads `alive` on most
+# pairs, so that narrower question turns steady measurable progress into a coin
+# flip, while this one stays true across the window and goes false a bounded
+# time after the movement actually stops.
+fm_progress_advancing() {  # <state-dir> <id>
+  local age
+  [ "$FM_PROGRESS_LATCH_MAX_SECS" -gt 0 ] 2>/dev/null || {
+    [ "$(fm_progress_verdict "$1" "$2")" = advanced ]
+    return
+  }
+  age=$(fm_progress_advanced_age "$1" "$2")
+  [ "$age" != - ] || return 1
+  [ "$age" -le "$FM_PROGRESS_LATCH_MAX_SECS" ]
 }

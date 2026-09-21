@@ -1052,7 +1052,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             "worktree written" "writing its worktree"
           return 0
         fi
-        if [ "$(fm_progress_verdict "$STATE" "$task")" = advanced ]; then
+        if fm_progress_advancing "$STATE" "$task"; then
           wedge_defer "$win" "$since_file" "$label" "$age" \
             "rendered progress measured" "showing measurable progress"
           return 0
