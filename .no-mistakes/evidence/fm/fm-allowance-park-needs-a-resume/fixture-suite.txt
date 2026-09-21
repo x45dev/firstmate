@@ -17,9 +17,17 @@ ok - a worker that is not parked is untouched by the allowance check
 ok - a park surfaces once per episode rather than on every poll
 ok - a pane-only park surfaces once per episode instead of re-waking on every poll
 ok - a parked worker past its reset is resumed by a steering message, exactly once per park
+/home/dev/.no-mistakes/worktrees/5480956096ee/01M3179S7P7119DQRTNKCKYRYQ/bin/fm-watch.sh: trap: line 2: unexpected EOF while looking for matching `)'
+/home/dev/.no-mistakes/worktrees/5480956096ee/01M3179S7P7119DQRTNKCKYRYQ/bin/fm-watch.sh: line 1479: unexpected EOF while looking for matching `)'
 ok - a parked worker whose allowance is still spent is not messaged at all, and is the moment it clears
 ok - a park is not messaged until the reset its own refusal record names has passed
 ok - a worker whose transcript moved past its reset is neither surfaced nor messaged, whatever its pane still shows
+/home/dev/.no-mistakes/worktrees/5480956096ee/01M3179S7P7119DQRTNKCKYRYQ/bin/fm-watch.sh: trap: line 2: unexpected EOF while looking for matching `)'
+/home/dev/.no-mistakes/worktrees/5480956096ee/01M3179S7P7119DQRTNKCKYRYQ/bin/fm-watch.sh: line 1479: unexpected EOF while looking for matching `)'
 ok - a resume that did not take is retried later, even when the park has no recorded reset to tell it apart
 ok - the same notice either side of a reset is two parks, and the second is resumed once its own reset has passed
 ok - a fresh pane-only park is surfaced even with an old resolved refusal in the transcript tail
+
+real	1m13.469s
+user	0m25.692s
+sys	0m47.845s
