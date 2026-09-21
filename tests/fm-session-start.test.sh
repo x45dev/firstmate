@@ -2399,8 +2399,25 @@ EOF
   pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
 
+# A stand-in away daemon: a real live process whose identity this home's daemon
+# lock records, exactly the ownership fm_afk_daemon_owns_supervision checks.
+# Identity is read under the same PATH the session start sees.
+start_afk_daemon_fixture() {  # <home> <path>
+  local home=$1 path=$2 pid lock
+  # Detached from the caller's command-substitution pipe, or $(...) would wait
+  # out the whole sleep.
+  sleep 600 >/dev/null 2>&1 &
+  pid=$!
+  lock="$home/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$pid" > "$lock/pid"
+  # shellcheck source=/dev/null
+  ( PATH="$path"; . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$pid" > "$lock/pid-identity" )
+  printf '%s\n' "$pid"
+}
+
 test_next_step_afk_delegates_to_daemon() {
-  local rec root home fakebin out
+  local rec root home fakebin out daemon_pid
   rec=$(new_world next-step-afk)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2408,6 +2425,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   : > "$home/state/.afk"
+  daemon_pid=$(start_afk_daemon_fixture "$home" "$fakebin:$BASE_PATH")
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -2416,8 +2434,43 @@ EOF
   assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
   assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
   assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
+  assert_not_contains "$out" "AWAY DAEMON DOWN" "a live daemon was reported down"
 
+  fm_test_stop "$daemon_pid" "away daemon fixture"
   pass "next step delegates watcher ownership to the AFK daemon"
+}
+
+# The reap: the harness kills the daemon and the away flag stays behind. The
+# digest must report that nothing is supervising, never that the daemon owns
+# the watcher, whether or not a posture record exists.
+test_afk_reaped_daemon_is_reported_down() {
+  local rec root home fakebin out daemon_pid
+  rec=$(new_world afk-reaped)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/state/.afk"
+  daemon_pid=$(start_afk_daemon_fixture "$home" "$fakebin:$BASE_PATH")
+  fm_test_stop "$daemon_pid" "away daemon fixture" KILL
+  wait "$daemon_pid" 2>/dev/null || true
+  [ -e "$home/state/.afk" ] || fail "reap fixture lost the away flag"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "AWAY DAEMON DOWN - the away flag stands but no live daemon holds this home, so NOTHING is supervising (legacy flag" "legacy-flag digest did not report the reaped daemon"
+  assert_contains "$out" "relaunch it now" "next step did not tell the agent to relaunch the reaped daemon"
+  assert_not_contains "$out" "daemon owns the watcher" "digest still claimed the reaped daemon owns the watcher"
+
+  if ! { FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" propose >/dev/null 2>&1 \
+    && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null 2>&1; }; then
+    fail "reap fixture could not confirm an away-posture record"
+  fi
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "; AWAY DAEMON DOWN - the away flag stands but no live daemon holds this home, so NOTHING is supervising." "posture-record digest did not report the reaped daemon"
+  assert_not_contains "$out" "daemon owns the watcher" "posture-record digest still claimed the reaped daemon owns the watcher"
+
+  pass "session start reports a reaped away daemon as supervision down, not as owning the watcher"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -2648,6 +2701,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_afk_reaped_daemon_is_reported_down
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker

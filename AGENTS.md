@@ -459,7 +459,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
 - `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words; entry announces hold-for-return only, and the record's clauses are recorded, not executed, in this release.
-- While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
+- While a live daemon runs, it owns supervision and you do not arm a separate watcher; `state/.afk` alone is never the evidence, so `bin/fm-afk-launch.sh status` decides and a `NOT supervising` answer means relaunch with `bin/fm-afk-launch.sh start`.
   The daemon is never launched on Pi, where the ordinary supervision session continues under the record.
 - A marked message while away mode is active is internal escalation and does not exit away mode.
 - A message beginning `/afk` refreshes away mode.
