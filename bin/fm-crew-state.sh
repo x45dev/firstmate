@@ -28,7 +28,9 @@
 #      gone/dead.
 #   2. Parked on the ACCOUNT allowance (bin/fm-allowance-lib.sh)? That outranks
 #      every source below, which would otherwise describe a worker waiting at its
-#      limit prompt as still working. Reported as parked with the cause.
+#      limit prompt as still working. Reported as parked with the cause, and only
+#      while that library still reads the verdict as current: it stops claiming a
+#      park once the worker's transcript holds a turn written after its own reset.
 #   3. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
@@ -269,8 +271,18 @@ crew_busy_verdict() {  # <target>
 # no-mistakes run reports the step it stalled on, and the busy record can still
 # read busy from a turn that never closed - which is exactly what made the
 # 2026-08-17 outage expensive to diagnose. So the park is read first and reported
-# as the cause, because recovery is a single Enter once the reset has passed and
-# the only hard part was ever knowing that.
+# as the cause, because the fleet supervisor resumes it from that cause once the
+# reset has passed (bin/fm-allowance-resume-lib.sh) and the only hard part was
+# ever knowing it.
+#
+# The verdict is bounded in time by its own owner: a refusal record stops being
+# read as current state once the worker's transcript holds a record written at or
+# after the reset the notice names, and that episode's notice left on the pane
+# cannot revive it. Without that bound this section went on reporting
+# `parked - source: allowance` for a worker that had been resumed and was visibly
+# working, which is the same "every source reads quiet" failure in the other
+# direction - and a stale assertion here is worse than none, because every
+# recovery path above reads this line rather than the pane.
 #
 # bin/fm-allowance-lib.sh owns the verdict and gates it per harness, so an adapter
 # with no verified signature falls straight through to the sources below and this
@@ -284,7 +296,7 @@ if [ -n "$WT" ]; then
     ALLOWANCE_TAIL=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || ALLOWANCE_TAIL=''
   fi
   if ALLOWANCE_DETAIL=$(fm_allowance_park_detail "$HARNESS" "$WT" "$ALLOWANCE_TAIL"); then
-    emit parked allowance "${ALLOWANCE_DETAIL#* } (${ALLOWANCE_DETAIL%% *} signal; resumes on a single Enter once the reset has passed)"
+    emit parked allowance "${ALLOWANCE_DETAIL#* } (${ALLOWANCE_DETAIL%% *} signal; the refused turn already ended, so it resumes on a steering message rather than a keystroke)"
   fi
 fi
 

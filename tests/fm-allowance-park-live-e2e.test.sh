@@ -18,6 +18,11 @@
 #      on entirely.
 #   2. a real, healthy, unparked worker is NOT classified as parked, from either
 #      signal, against its actual rendered pane.
+#   3. the refusal records the operator's own store already holds still carry the
+#      machine-readable reset the time bound and the resume gate both read. That
+#      field is version-gated rather than universal, so it is read from real
+#      records rather than assumed; a store with no refusal in it reports that it
+#      checked nothing rather than passing.
 #
 # What it deliberately does NOT prove: that a REAL refusal still writes the
 # fields the structural signal matches. Forcing one means exhausting the account
@@ -122,10 +127,17 @@ for harness in $ALL_HARNESSES; do
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION" -n "$win" -c "$wt" \
     || fail "$harness ($version): could not open a pane"
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:$win" "cd $(printf '%q' "$wt") && $(printf '%q' "$bin")" Enter
-  # A first launch in a fresh directory asks its own trust question; answering it
-  # is what gets the session far enough to create its store. No prompt follows, so
-  # no model tokens are spent.
+  # A first launch in a fresh directory asks its own trust question, and
+  # answering it is what gets the session far enough to create its store. The
+  # answer is selected explicitly rather than taken as the default: Claude Code
+  # 2.1.278 preselects "No, exit", so a bare Enter here quit the session and left
+  # no store at all, which this guard then reported as the store derivation
+  # having moved. Down-then-Enter selects the trusting answer on the dialog as it
+  # stands; a vendor that reorders it will fail this guard loudly, which is the
+  # behaviour wanted. No prompt follows, so no model tokens are spent.
   sleep 8
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:$win" Down
+  sleep 1
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:$win" Enter
   sleep 12
 
@@ -144,6 +156,32 @@ for harness in $ALL_HARNESSES; do
   fi
 
   pass "$harness ($version): store resolves at $store and a healthy worker is not read as parked"
+
+  # 3. the reset the bound and the resume gate read is still being written.
+  #
+  # This one reads the operator's REAL store rather than the throwaway lab above,
+  # because a healthy worker never produces a refusal record and forcing one
+  # means exhausting the account allowance - the outage this whole check exists
+  # to shorten. Every refusal already on disk is counted instead, and the check
+  # is "is the field still present on recent records", never "was it always
+  # there": older builds wrote a null quotaLimits, and the library treats an
+  # absent reset as no bound rather than as zero.
+  real_store=$(harness_store_dir "$harness" "$LAB/wt")
+  real_store=${real_store%/projects/*}/projects
+  if [ ! -d "$real_store" ]; then
+    note "$harness ($version): no local transcript store at $real_store, so no refusal evidence to read"
+  else
+    refusals=$(grep -rah '"apiErrorStatus":429' "$real_store" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${refusals:-0}" -eq 0 ]; then
+      note "$harness ($version): no refusal records on disk, so the recorded reset could not be checked - do not read this as present"
+    else
+      with_reset=$(grep -rah '"apiErrorStatus":429' "$real_store" 2>/dev/null \
+        | grep -ac '"resetsAt"[ ]*:[ ]*[0-9]' || true)
+      [ "${with_reset:-0}" -gt 0 ] \
+        || fail "$harness ($version): $refusals refusal records on disk and not one carries a resetsAt - the park time bound and the resume gate are both reading a field the harness no longer writes"
+      note "$harness ($version): $with_reset of $refusals refusal records carry a machine-readable reset"
+    fi
+  fi
 done
 
 [ "$CHECKED" -gt 0 ] \

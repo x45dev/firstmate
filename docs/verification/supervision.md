@@ -242,6 +242,7 @@ tests/fm-crew-state.test.sh
 
 A worker whose provider refused the turn on the account allowance keeps a live process, a live endpoint, and a normally rendered pane, so every liveness probe above reads it as healthy.
 [`bin/fm-allowance-lib.sh`](../../bin/fm-allowance-lib.sh) is the single owner of that verdict, and [`bin/fm-watch.sh`](../../bin/fm-watch.sh) and [`bin/fm-crew-state.sh`](../../bin/fm-crew-state.sh) both consult it ahead of their busy gate, because the semantic busy state above stays busy across a refused turn whose closing hook never fires.
+[`bin/fm-allowance-resume-lib.sh`](../../bin/fm-allowance-resume-lib.sh) is the single owner of what the watcher then does about it.
 The verdict reads two independent signals and either alone carries it, so no single vendor string is load-bearing.
 
 Per-harness support is a gate: an adapter with no entry below reports "not parked" and behaves exactly as it did before the library existed.
@@ -286,6 +287,151 @@ something later (resumed): 39
 Transcripts live at `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<worktree with / and . replaced by ->/<session>.jsonl`, and `bin/fm-spawn.sh` forwards firstmate's own resolved store onto the crewmate launch, so the watcher resolves the same store the crewmate writes.
 At session start only `<project-dir>/<session>/tool-results/` exists; the transcript appears once the session has content, which is why the live guard below asserts on the directory rather than on a transcript.
 
+### The recorded reset, and the bound it puts on the verdict
+
+Taking the last conversational record makes the verdict current state rather than history, but it says nothing about how long that state may be asserted for.
+Left unbounded it kept reporting `state: parked · source: allowance` for a worker that had been resumed and was visibly working, so only a pane peek could tell stopped from running - the same "every source reads quiet" gap this whole section exists to close, in the other direction.
+
+The refusal record carries the reset it is waiting on as an absolute epoch second, beside the error fields above, which is what bounds it.
+That field is preferred over the clock rendered inside the notice (`resets 2:50am (UTC)`) because the rendered clock carries no date and so cannot say which day a weekly window resets on.
+Measured over the local store on 2026-09-20:
+
+```sh
+grep -rah '"apiErrorStatus":429' ~/.claude/projects/ | wc -l
+#     245
+
+grep -rah '"apiErrorStatus":429' ~/.claude/projects/ | grep -ac '"resetsAt"[ ]*:[ ]*[0-9]'
+#     232
+```
+
+The 13 without one are a `"quotaLimits":null` written by Claude Code 2.1.226 and 2.1.227; every newer build records `{"status":"rejected","resetsAt":<epoch>,"rateLimitType":"five_hour"|"seven_day"}`.
+An absent reset is therefore read as no bound, never as zero, so a build that records none keeps exactly the pre-bound behaviour.
+
+The reset is what identifies a park episode, because the notice text is byte-identical every window and cannot tell one park from the next.
+`bin/fm-watch.sh` keys its once-per-episode wake and its resume record on the recorded reset together with the notice, so a worker refused again on the same notice but a new reset is a new episode, surfaced and resumed on its own terms.
+
+The same field bounds the verdict in time.
+The structural arm stops claiming a park once the newest `user`, `assistant` or `system` record in the transcript tail that carries its own `timestamp` is at or after the recorded reset.
+A worker still sitting at its limit prompt has taken no turn, and the refusal record itself is written while its own reset is still in the future, so a fresh park can never satisfy the bound; a resumed worker satisfies it on its first turn.
+
+The bound reads record timestamps rather than the file's mtime because a refusal-terminated transcript is written to for reasons that are not a turn.
+Measured over the local store on 2026-09-20, from the repository root, with the library's own helpers:
+
+```sh
+. bin/fm-allowance-lib.sh
+refused=0 reset=0 mtime_cross=0 stamp_cross=0
+for f in ~/.claude/projects/*/*.jsonl; do
+  _fm_allowance_record_parked "$f" >/dev/null 2>&1 || continue
+  refused=$((refused + 1))
+  r=$(_fm_allowance_record_reset "$f" 2>/dev/null) || continue
+  reset=$((reset + 1))
+  [ "$(_fm_allowance_mtime "$f")" -ge "$r" ] && mtime_cross=$((mtime_cross + 1))
+  _fm_allowance_record_superseded "$f" && stamp_cross=$((stamp_cross + 1))
+done
+echo "last conversational record is the refusal: $refused"
+echo "  of those, with a recorded reset:         $reset"
+echo "  file mtime at or after that reset:       $mtime_cross"
+echo "  newest record timestamp at or after it:  $stamp_cross"
+# last conversational record is the refusal: 40
+#   of those, with a recorded reset:         40
+#   file mtime at or after that reset:       6
+#   newest record timestamp at or after it:  0
+```
+
+So a still-parked worker's transcript CAN cross its own reset by file mtime: 6 of the 40 refusal-terminated transcripts did, and an mtime bound would have read all six as resumed.
+The records written after the refusal in those six are all non-conversational session metadata:
+
+```sh
+. bin/fm-allowance-lib.sh
+for f in ~/.claude/projects/*/*.jsonl; do
+  _fm_allowance_record_parked "$f" >/dev/null 2>&1 || continue
+  r=$(_fm_allowance_record_reset "$f" 2>/dev/null) || continue
+  [ "$(_fm_allowance_mtime "$f")" -ge "$r" ] || continue
+  tail -n "$FM_ALLOWANCE_RECORD_TAIL_LINES" "$f" | sed -n '/"apiErrorStatus":429/,$p' | tail -n +2 \
+    | grep -ao '^{"type":"[a-z-]*"' | sed 's/^{"type":"//; s/"$//' | sort -u
+done | sort | uniq -c | sort -rn
+#       6 last-prompt
+#       4 bridge-session
+#       3 file-history-snapshot
+#       1 queue-operation
+#       1 pr-link
+#       1 permission-mode
+#       1 mode
+#       1 cost-state
+#       1 atis-latch
+#       1 ai-title
+```
+
+None of them is a turn, none carries a timestamp of its own that the bound reads, and the `cost-state` records look like shutdown writes.
+Every transcript above is a finished session, so this measures what the store holds and not what a running worker does.
+One live park has been watched since: on Claude Code 2.1.278 on 2026-09-20 the transcript took no write at all between the refusal and the worker being restarted by hand more than six hours later, across its own reset, so those metadata writes were not produced during that park.
+That is one park and does not refute the crossings above, and whether a live parked session ever receives such writes is still not settled by it.
+The code therefore does not depend on a parked worker's file staying still: a metadata write never satisfies the bound, and only a record that carries a timestamp at or after the reset does.
+Its blind spot is the opposite one: a resumed worker whose only post-reset write is untimestamped metadata reads as still parked until its first timestamped record lands, which costs one stale report and, at most, one further steering message once the retry interval below has passed.
+
+The rendered arm is bounded by the same transcript, and only for the episode the transcript has shown over.
+A pane has no clock, so a notice still near its prompt says nothing about when it was rendered.
+Where the transcript holds a refusal it has superseded, or that a later conversational record followed, and that refusal's own recorded reset is already past, a pane notice showing the same reset clock is that episode's scrollback and is not reported.
+A pane notice showing a different clock, or any notice where the refusal recorded no reset or its reset has not passed, is reported as before, because a worker that parked again through the pane-only affordance the transcript never records leaves the pane as the only evidence there is.
+The pane's newest reset clock is the one compared, so an old notice left above a fresh one cannot stand in for it.
+
+Suppressing the pane whenever the transcript holds any resolved refusal would delete it instead of bounding it, and this is how much of the store that would delete it for, measured on 2026-09-20 from the repository root with the library's own helpers:
+
+```sh
+. bin/fm-allowance-lib.sh
+anywhere=0 tail_refusal=0 resumed=0 suppressible=0
+now=$(date -u +%s)
+for f in ~/.claude/projects/*/*.jsonl; do
+  grep -aq '"apiErrorStatus":429' "$f" && anywhere=$((anywhere + 1))
+  if _fm_allowance_record_parked "$f" >/dev/null 2>&1; then
+    tail_refusal=$((tail_refusal + 1))
+  elif over=$(_fm_allowance_record_resumed "$f"); then
+    tail_refusal=$((tail_refusal + 1))
+    resumed=$((resumed + 1))
+    reset=${over%%|*}
+    case "$reset" in ''|*[!0-9]*) continue ;; esac
+    [ "$reset" -le "$now" ] && _fm_allowance_reset_clock "${over#*|}" >/dev/null && suppressible=$((suppressible + 1))
+  fi
+done
+echo "transcripts with a refusal record anywhere in the file:              $anywhere"
+echo "transcripts with a refusal inside the last $FM_ALLOWANCE_RECORD_TAIL_LINES lines:                 $tail_refusal"
+echo "  of those, the refusal was followed by a later turn (resolved):     $resumed"
+echo "  of those, a recorded past reset and a reset clock to compare:      $suppressible"
+# transcripts with a refusal record anywhere in the file:              105
+# transcripts with a refusal inside the last 200 lines:                 58
+#   of those, the refusal was followed by a later turn (resolved):     18
+#   of those, a recorded past reset and a reset clock to compare:      18
+```
+
+The denominator matters, because two counts of this store disagree through counting different things.
+The 105 counts every transcript holding a refusal record anywhere in the file, which includes refusals so old they have scrolled out of the last 200 lines the library reads, and those cannot affect the pane arm at all.
+The predicate the pane arm acts on is decided over the last 200 lines only, so its denominator is the 58 transcripts with a refusal inside that tail, and 18 of those 58 hold a refusal a later turn followed.
+A rule that shut the pane out whenever such a refusal was in view would therefore have removed the pane arm for those 18 workers whatever their pane showed, including a worker that parked again through the affordance the transcript never records.
+The rule above removes it for such a worker only when the pane's newest reset clock is the one the resolved refusal named, which is a claim about one notice and not about the worker.
+tests/fm-allowance-park.test.sh holds the shape that separates the two: a refusal, forty further turns so it is still inside the tail, and then a fresh park the transcript does not record.
+
+### Resuming the park
+
+Detecting a park and leaving it stopped is most of the cost.
+On 2026-09-11 five workers parked at once, and the wake's wording told its reader to press Enter: `fm_backend_send_key <backend> <target> Enter` returned success for all five and moved none of them, because the refused turn had ENDED and a bare Enter submits an empty composer.
+An ordinary steering message is what restarted them.
+On 2026-09-20 three workers sat stopped overnight with their reset long past, restarted only when a person messaged each one by hand.
+
+So [`bin/fm-allowance-resume-lib.sh`](../../bin/fm-allowance-resume-lib.sh) resumes a parked worker with a steering record on the ordinary inbox plane - which brings the existing re-ring ladder with it - once two gates pass:
+
+| Gate | Source | Why it is there |
+| --- | --- | --- |
+| The recorded reset has passed by a `FM_ALLOWANCE_RESUME_GRACE_SECS` margin (120) | the refusal record's own `resetsAt` | Local and free, and the only gate that can veto a resume the provider read would wrongly allow. Unknown for a pane-only park, which never blocks on its own. |
+| The provider reports headroom | `quota-axi --json`, `quotaSemantics.effectiveAvailability` | The authority. A message sent into an allowance that is still spent is consumed for nothing and the worker parks again on the same turn, so no positive evidence means no resume. |
+
+A known scope reporting `runway.status` of `exhausted_now`, or zero remaining, is spent; a known scope with headroom and no spent sibling is ready; a missing, incompatible, timed-out or malformed read is unknown, which is not headroom.
+The read is cached per home for `FM_ALLOWANCE_QUOTA_TTL` seconds so a fleet of parked workers costs one subprocess rather than one each.
+The resume fires once per park episode per worker, keyed on the same recorded reset and notice the wake de-duplicates on.
+A resume that did not take leaves the worker parked and refused again on an identical notice, so nothing reads it as unparked and clears the record of the attempt; that record ages out after `FM_ALLOWANCE_RESUME_RETRY_SECS` (1800), after which both gates are asked again and the worker is retried.
+
+The resume runs inside the watcher's own poll, so it can only help while supervision is polling.
+When the watcher is not running, or is not the build that carries this change, nothing resumes a parked worker, and the fixture tests below imply no cover for that case.
+
 Deterministic entry point:
 
 ```sh
@@ -302,6 +448,51 @@ FM_ALLOWANCE_PARK_DRIFT=1 tests/fm-allowance-park-live-e2e.test.sh
 
 That guard proves the store derivation still lands where the harness writes and that a healthy worker is not classified as parked.
 It deliberately does not prove that a real refusal still writes the matched fields, because forcing one means exhausting the account allowance, which is the outage this detection exists to shorten; that half is refreshed by capturing the next real refusal against the counts above.
+
+### What the resume has and has not been proven against
+
+Some of the scenarios the change claims were driven live against the product, and the rest are instrumented for a real event and unconfirmed until it arrives.
+Those remaining scenarios need a real account-allowance refusal in a live session followed by a watcher that carries this change, and a refusal cannot be provoked without causing the outage this change exists to shorten, so no fixture is dressed up as a live verdict here.
+
+Proven live, by the commands in this section:
+
+- The store measurements above reproduce over the real `~/.claude/projects` store, by the crossing-rate and denominator commands recorded beside those claims.
+- A healthy worker on the installed Claude Code is not read as parked and its session store resolves, by `FM_ALLOWANCE_PARK_DRIFT=1 tests/fm-allowance-park-live-e2e.test.sh`.
+
+Proven live by one real park, on Claude Code 2.1.278 on 2026-09-20, captured end to end by the armed capture described below:
+
+- A real refusal writes the fields the structural signal matches.
+  The record, written at 13:15:43Z, is `type: assistant` with `isApiErrorMessage: true`, `apiErrorStatus: 429`, `error: "rate_limit"`, `message.model: "<synthetic>"`, `stop_reason: "stop_sequence"`, all usage counters zero, a single text block holding only the notice `You've hit your session limit · resets 2:20pm (UTC)`, and `quotaLimits` of `status: "rejected"`, `resetsAt: 1789914000`, `rateLimitType: "five_hour"`, `overageStatus: "rejected"`, `isUsingOverage: false`.
+  The recorded `resetsAt` is 14:20:00Z and agrees exactly with the rendered `resets 2:20pm (UTC)`.
+  The structural signal matched that record on every one of 923 polls, and the fixtures in `tests/fm-allowance-park.test.sh` now pin this measured shape rather than an assumed one.
+- That live park took no write to its transcript for its whole duration, 13:15:47Z to 15:59:50Z, across the reset at 14:20:00Z; the capture followed the file by byte offset every ten seconds and never had a byte to record.
+  So the record bound never dropped the verdict, `_fm_allowance_record_superseded` answering no on all 923 polls.
+  This is one real park with no post-refusal writes observed, and it does not refute the historical mtime crossings measured above; it shows those were not produced during this park.
+- The pane rendered the notice followed by `/upgrade to increase your usage limit.` above an empty composer, which confirms live the premise the resume rests on: the turn had ended, so a keystroke had nothing to submit.
+- The unfixed watcher deployed at the time surfaced the park 12 seconds after the refusal and wrote its marker, then took no action, and no steering record arrived during the park, the last one predating the refusal by ten minutes.
+  The worker sat parked for more than six hours past its own reset and was restarted by hand, so the defect this change exists to end was reproduced in the field while the change was being developed.
+
+The detection, the recorded reset and the reset-has-passed gate were therefore proven against this real park.
+One link in the resume chain is still unproven live, the provider-headroom probe: the capture did not record `quota-axi`, so only the fixtures, which stub it, speak to that gate.
+
+Proven against fixture transcripts and panes only, by `tests/fm-allowance-park.test.sh`, which stubs `quota-axi`:
+
+- A parked worker is resumed by a steering message exactly once, only after its reset has passed and `quota-axi` reports headroom.
+- A resume that did not take is retried after the true reset, including when the same notice text recurs.
+- `fm-crew-state.sh` stops reporting a park once the worker has worked past its reset, and still reports a real park.
+- A fresh pane-only park is still surfaced when an old resolved refusal sits in the last 200 transcript lines.
+- A worker whose transcript moved past its reset is neither surfaced nor messaged, whatever its pane still shows.
+
+Still awaiting live evidence are the resume actually firing, the retry after a resume that did not take, the state reader clearing on a live worker, and both adversarial cases listed above.
+What would prove them is a watcher carrying this change running through one real park.
+
+An armed capture records that occurrence in the operating home's per-task `data/` directory, outside version control, polling every ten seconds against the live workers, and its `capture.sh` header documents each field.
+For each real refusal it records the refusal record verbatim with whatever timestamps it carries, the pane notice as rendered, every later write to the transcript with each record's type, and the arrival and count of steering records at the reset.
+On every poll it also records the verdict of this change's own functions against the real transcript and the real pane, from a copy of the library pinned at commit `b22a0701230f328454249738e189efbeccd5b179`.
+
+The watcher deployed in the operating home does not carry this change, so what the capture records at the reset is what the UNFIXED fleet does, which is how the park above went unresumed.
+That confirms the defect and does not validate the resume.
+The pinned-library verdicts are what speak to the detection and gating half of the fix, and the resume itself stays unconfirmed against a real park until a watcher carrying this change runs through one.
 
 ## Turn-end guard
 
