@@ -226,15 +226,37 @@ check_harness_movement() {  # <name>
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
-  verdict=$(sample_verdict "$win" "$name-settled")
-  if [ "$verdict" != still ]; then
+  # The settled direction asserts exactly what the watcher depends on from a pane
+  # that has stopped working, and nothing stricter. It must never read `advanced`,
+  # the only verdict that feeds the latch and defers a wedge. And it must reach
+  # `still` once the rendering has stopped, the only verdict that admits a wedge
+  # or refuses a stale busy marker. A single `alive` pair on the way there is a
+  # footer transition such as a harness notice expiring, and harms neither: it
+  # defers no wedge, and holds a busy claim for one poll. Demanding `still` from
+  # the first pair would make the result depend on whether such a notice expires
+  # inside the sample gap, so up to three consecutive pairs are taken instead.
+  local pair=0 settled=0 seen=''
+  while [ "$pair" -lt 3 ]; do
+    pair=$((pair + 1))
+    verdict=$(sample_verdict "$win" "$name-settled")
+    seen="$seen${seen:+, }$verdict"
+    [ "$verdict" != advanced ] || break
+    if [ "$verdict" = still ]; then settled=1; break; fi
+  done
+  if [ "$settled" -ne 1 ]; then
     FAILED=1
-    printf 'not ok - MOVEMENT INERT: %s (%s) rendered a settled pane that read "%s", not "still", so nothing on this harness would ever be admitted as a possible wedge. Something in its idle rendering moves; bin/fm-progress-lib.sh must stop counting it as movement.\n' \
-      "$name" "$version" "$verdict" >&2
+    if [ "$verdict" = advanced ]; then
+      printf 'not ok - MOVEMENT INERT: %s (%s) rendered a settled pane whose sample pairs read "%s": "advanced" on a pane that stopped working would defer a wedge through the latch. Something in its idle rendering reads as new content; bin/fm-progress-lib.sh must stop counting it as progress.\n' \
+        "$name" "$version" "$seen" >&2
+    else
+      printf 'not ok - MOVEMENT INERT: %s (%s) rendered a settled pane whose sample pairs read "%s" and never reached "still" in %s pairs, so nothing on this harness would ever be admitted as a possible wedge. Something in its idle rendering keeps moving.\n' \
+        "$name" "$version" "$seen" "$pair" >&2
+    fi
     show_sample_evidence "$name-settled"
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
+  note "$name ($version): settled sample pairs read '$seen'"
 
   CHECKED=$((CHECKED + 1))
   pass "$name ($version): a running turn is not read as still, and a settled pane is"

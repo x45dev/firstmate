@@ -284,8 +284,8 @@ ok - a working run carries its own step-activity recency, and a run with no acti
 
 `tests/fm-progress-lib.test.sh` reported 22 passing assertions with no failures on that run, and the listed `tests/fm-watch-triage.test.sh` assertions were run individually.
 
-The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in both directions - a running turn must not read `still`, and a settled pane must.
-That guard has no passing live run on record: its attempts, including the settled-direction failure that led to the line-set content counter, are in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence"), and a pass in both directions is still owed.
+The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in both directions - a running turn must not read `still`, and a settled pane must never read `advanced` and must reach `still`.
+That guard passed against claude in both directions on 2026-09-21, recorded verbatim in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence"); the other harnesses are not run there because this fleet dispatches only claude.
 
 ### The declared-wait repeat, unconfirmed
 
