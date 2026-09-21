@@ -27,10 +27,10 @@
 # background tool) is NOT a safe host: the harness reaps it under its own
 # memory accounting, not the kernel's, and state/.afk then outlives the daemon
 # so away mode reads active with nothing supervising. Every daemon-running
-# harness therefore uses `start`, which creates a non-visible tracked terminal the harness does not
-# own (a herdr tab/workspace with --no-focus, or a detached tmux session),
-# never splits the captain's active tab, and NEVER uses shell `&` (which
-# herdr/codex can reap).
+# harness therefore uses `start`, which creates a non-visible tracked terminal
+# the harness does not own (a herdr tab/workspace with --no-focus, or a detached
+# tmux session), never splits the captain's active tab, and NEVER uses shell `&`
+# (which herdr/codex can reap).
 #
 # The flag is never the evidence: `status` answers "is away mode supervising"
 # from a live, identity-matched daemon holding this home's daemon lock
@@ -41,7 +41,9 @@
 # from its OWN inherited env (discover_supervisor_target). Running it in a
 # separate terminal would make it discover its OWN pane, so this captures the
 # captain pane FIRST (from the pane this script runs in) and passes it in as
-# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
+# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly. For the same reason it
+# passes the captain's resolved harness in as FM_DAEMON_PRIMARY_HARNESS, which
+# the daemon cannot detect from a terminal the captain's harness does not own.
 #
 # Usage:
 #   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
