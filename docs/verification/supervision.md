@@ -494,8 +494,6 @@ The watcher deployed in the operating home does not carry this change, so what t
 That confirms the defect and does not validate the resume.
 The pinned-library verdicts are what speak to the detection and gating half of the fix, and the resume itself stays unconfirmed against a real park until a watcher carrying this change runs through one.
 
-The park above also exposed a structural limit no fixture can cover: the resume runs inside the watcher's own poll, so when supervision is not polling, nothing resumes a parked worker and this change cannot help.
-
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-05, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.

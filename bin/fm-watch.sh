@@ -1393,9 +1393,9 @@ surface_nonterminal_stale() {  # <window> <hash>
 # sitting at its limit prompt cannot re-wake firstmate every poll. The episode is
 # the reset the refusal record names (bin/fm-allowance-lib.sh), because the notice
 # text is byte-identical every window: a worker that parks again on the NEXT reset
-# is a new episode and surfaces again. It is dropped the moment
-# the worker is no longer parked, so a later park surfaces again - but only on a
-# call that saw every signal available for this window this cycle. <final>=1
+# is a new episode and surfaces again. It is dropped the moment the worker is no
+# longer parked, so a later park surfaces again - but only on a call that saw
+# every signal available for this window this cycle. <final>=1
 # marks that call: either it carries the settled pane tail, or the caller knows
 # no pane check will follow this cycle (a secondmate not admitted to the
 # pane-stale path). A structural-only probe ahead of that (<final>=0, empty

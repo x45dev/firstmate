@@ -277,7 +277,8 @@ crew_busy_verdict() {  # <target>
 #
 # The verdict is bounded in time by its own owner: a refusal record stops being
 # read as current state once the worker's transcript holds a record written at or
-# after the reset the notice names, and a notice left on the pane cannot revive it. Without that bound this section went on reporting
+# after the reset the notice names, and that episode's notice left on the pane
+# cannot revive it. Without that bound this section went on reporting
 # `parked - source: allowance` for a worker that had been resumed and was visibly
 # working, which is the same "every source reads quiet" failure in the other
 # direction - and a stale assertion here is worse than none, because every
