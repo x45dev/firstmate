@@ -1,0 +1,17 @@
+# claude (2.1.278 (Claude Code)): a running turn reads 'alive'
+# claude (2.1.278 (Claude Code)): settled sample pairs read 'alive, still'
+# claude (2.1.278 (Claude Code)): a hung foreground command read 'alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive alive' across 240s
+# first vs last capture of the hung pane (< first, > last):
+# 26,27c26,27
+# < ● Printing pending inbox messages · 21s
+# <   ⎿  $ timeout 330 tail -f /dev/null (21s)
+# ---
+# >   Printing pending inbox messages · 4m 31s
+# >   ⎿  $ timeout 330 tail -f /dev/null (4m 31s)
+# 43c43
+# < ✶ Crunching… (24s · ↓ 379 tokens)
+# ---
+# > ✻ Crunching… (4m 35s · ↓ 379 tokens)
+ok - claude (2.1.278 (Claude Code)): a hung foreground command never reads as advanced
+ok - claude (2.1.278 (Claude Code)): a running turn is not read as still, and a settled pane is
+ok - live movement-evidence guard: 1 harness(es) separate a running turn from a settled pane
