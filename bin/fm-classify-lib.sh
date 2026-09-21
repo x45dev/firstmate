@@ -171,18 +171,6 @@ status_is_captain_relevant() {
   printf '%s' "$line" | grep -qiE "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
-# 0 if a status line's leading verb reports COMPLETION (done:). The other three
-# terminal verbs are deliberately excluded: a failure, a blocker, and an open
-# decision all describe a crew that has stopped with something unresolved, while
-# a completion describes one whose remaining action belongs to somebody else.
-# That difference is what a stale alarm has to respect - a finished crew's pane
-# is idle BECAUSE it finished, so re-reporting that idleness reports nothing.
-status_is_completion() {  # <status-line>
-  local line=$1
-  [ -n "$line" ] || return 1
-  [ "$(status_line_verb "$line")" = "done" ]
-}
-
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
 # read of the line itself, so the daemon's classify_stale can reuse the last line
 # it already read without a fm-crew-state.sh call. Matches only the verb before the

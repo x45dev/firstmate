@@ -918,20 +918,27 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # for a cause nothing has proven, this captures the next occurrence with the one
 # fact that separates those two explanations.
 #
+# The record carries the declaration scope beside the age, and ages are compared
+# only within one scope: a fresh declaration legitimately restarts the age, so a
+# smaller age under a different scope is a new wait and not the tell.
+#
 # Costs one small read and one small write per FIRED re-surface, which is at most
 # once per PAUSE_RESURFACE_SECS per window, and never runs on an absorbed poll.
-resurface_audit() {  # <throttle-marker> <age>
-  local marker=$1 age=$2 audit prev now prev_age prev_ts moved
+resurface_audit() {  # <throttle-marker> <age> [scope]
+  local marker=$1 age=$2 scope=${3-} audit prev now prev_age prev_ts prev_scope scope_id=- moved
   case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ -z "$scope" ] || scope_id=$(printf '%s' "$scope" | cksum | cut -d' ' -f1)
   audit="$marker.anchor"
   now=$(date +%s)
   prev=$(cat "$audit" 2>/dev/null || true)
-  printf 'age=%s ts=%s\n' "$age" "$now" > "$audit" 2>/dev/null || return 0
-  case "$prev" in 'age='*' ts='*) ;; *) return 0 ;; esac
+  printf 'age=%s ts=%s scope=%s\n' "$age" "$now" "$scope_id" > "$audit" 2>/dev/null || return 0
+  case "$prev" in 'age='*' ts='*' scope='*) ;; *) return 0 ;; esac
   prev_age=${prev#age=}; prev_age=${prev_age%% *}
-  prev_ts=${prev#*ts=}; prev_ts=${prev_ts%%[!0-9]*}
+  prev_ts=${prev#*ts=}; prev_ts=${prev_ts%% *}
+  prev_scope=${prev#*scope=}
   case "$prev_age" in ''|*[!0-9]*) return 0 ;; esac
   case "$prev_ts" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$prev_scope" = "$scope_id" ] || return 0
   # What this age would be had the anchor stayed put: the previous age plus the
   # time that has passed since it was reported. Anything less means it advanced.
   moved=$(( prev_age + now - prev_ts - age ))
@@ -947,7 +954,7 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
-  resurface_audit "$throttle" "$age"
+  resurface_audit "$throttle" "$age" "$scope"
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
   wake "$reason"
 }
@@ -1018,8 +1025,8 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded worktree walk and one bounded pipeline
 # read per window per STALE_ESCALATE_SECS, never per poll. The movement verdict
 # costs nothing extra - the poll that captured the pane already recorded it.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason wedge_class
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [busy]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 busy=${6-} since age n reason wedge_class
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1035,12 +1042,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # One crew-state read answers both of this chain's authoritative
         # questions; see crew_wedge_class for why they share it.
         wedge_class=$(crew_wedge_class "$task")
-        if [ "$wedge_class" = complete ]; then
-          # Not a deferral: a finished crew is never a wedge, so this timer has
-          # nothing left to measure and the escalation is suppressed outright
-          # rather than rechecked on a long cadence. The anchor is re-taken so
-          # the bound restarts from the moment the crew stops reading complete,
-          # which is the first moment stillness means anything again.
+        if [ "$wedge_class" = complete ] && [ -z "$busy" ]; then
+          # Not a deferral: a finished crew's idle pane is never a wedge, so this
+          # timer has nothing left to measure and the escalation is suppressed
+          # outright rather than rechecked on a long cadence. The anchor is
+          # re-taken so the bound restarts from the moment the crew stops reading
+          # complete, which is the first moment stillness means anything again.
+          # A pane that reads busy never takes this: a crew steered after its last
+          # run passed reads complete while inside an open turn, and the busy
+          # completed-turn bound is the one catch for a foreground call that hung.
           date +%s > "$since_file"
           rm -f "$escalation_file"
           clear_write_tracking "$(window_key "$win")"
@@ -1210,7 +1220,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" busy
   return 1
 }
 
@@ -1428,29 +1438,6 @@ captain_call_stale_bound() {  # <window-key> <task>
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
-}
-
-# The same scope for a crew that declared its work COMPLETE. Carried under its
-# own prefix so a completion window and a captain-call window can never read
-# each other's marker as their own, and empty for every other terminal verb:
-# a failure, a blocker, and an open decision each leave something unresolved and
-# must keep alarming on every new hash exactly as they do today.
-stale_completion_declaration() {  # <task> <last-status-line>
-  status_is_completion "$2" || return 1
-  printf 'completion:%s' "$(stale_wait_declaration "$1")"
-}
-
-# 0 when a completion has ALREADY been surfaced for this window inside the
-# current re-surface cadence. A finished crew's pane keeps churning its hash on
-# a clock or a context counter, and every new hash re-enters the terminal path
-# carrying the same unchanged `done:` line - which is how one green PR reported
-# itself to firstmate over and over (2026-08-24). The first sight is the report
-# and still alarms; a later hash saying the same thing has nothing to add.
-# A pure read, so the caller records the throttle only after its wake landed.
-stale_completion_bound() {  # <window-key> <task> <last-status-line>
-  local declaration
-  declaration=$(stale_completion_declaration "$2" "$3") || return 1
-  stale_wait_throttled "$1" "$declaration"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -2665,11 +2652,6 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif stale_completion_bound "$key" "$task" "$last"; then
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              clear_write_tracking "$key"
-              triage_log "absorbed stale (completion already surfaced for this status; a new hash on a finished crew adds nothing): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
               # the captain already holds this work: further NEW pane hashes with
@@ -2683,14 +2665,6 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
-              # captain_call_stale_bound left the scope this alarm is recorded
-              # against, and its call identity is the more specific of the two.
-              # Only where it found no open call does a completion bind its own
-              # window, so the next hash carrying this same line is absorbed
-              # above instead of reporting the finished work a second time.
-              if [ -z "$STALE_WAIT_DECLARATION" ]; then
-                STALE_WAIT_DECLARATION=$(stale_completion_declaration "$task" "$last") || STALE_WAIT_DECLARATION=
-              fi
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"

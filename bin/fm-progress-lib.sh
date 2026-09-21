@@ -16,7 +16,8 @@
 #   footer   the harness's whole status-line region: its turn timer, spinner,
 #            token or context counter, keybind hints - whatever it renders there
 #   tokens   the token counter within that region, where its notation is known
-#   content  the rendered text OUTSIDE that region
+#   content  a rendered line OUTSIDE that region that the previous capture did
+#            not hold anywhere
 #
 # A dead process moves none of the three. A live worker moves the footer, since
 # a running harness redraws its own status line, and one making forward progress
@@ -41,9 +42,21 @@
 # to `alive` rather than to `still`: the safe direction, since `alive` defers no
 # wedge and licenses no claim that a worker is running.
 #
+# The content counter is a set comparison and not a digest of the body. The
+# footer is a fixed count of lines from the bottom, so a line that appears or
+# expires inside it slides every line above it across the boundary, and a digest
+# of "everything above the footer" then changes though no rendered text moved. A
+# line that merely changed side is not new output; only a body line that appeared
+# nowhere in the previous capture, footer included, is. That models no harness's
+# notation, and it is why the record carries one short digest per line of the
+# previous capture rather than one digest of the whole.
+#
 # Sample record: state/<id>.progress-sample - exactly one line, replaced whole:
 #
-#   v1 ts=<epoch> verdict=<v> footer=<digest|-> tokens=<digest|-> content=<digest|-> advanced_ts=<epoch|->
+#   v1 ts=<epoch> verdict=<v> footer=<digest|-> tokens=<digest|-> lines=<digest.digest...> advanced_ts=<epoch|->
+#
+# A record written without the lines field has no comparable prior, so it reads
+# unknown and is replaced; it can never read advanced.
 #
 # advanced_ts is the last time the pair read `advanced`, carried forward across
 # every later observation that did not. It exists because the wedge question is
@@ -110,15 +123,36 @@ _fm_progress_footer() {  # <tail>
   printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -n "$FM_PROGRESS_FOOTER_LINES"
 }
 
-# Everything ABOVE that footer region: the rendered conversation itself, which
-# changes only when the worker actually produced something new.
-_fm_progress_body() {  # <tail>
-  local total keep
-  total=$(printf '%s\n' "$1" | grep -c -v '^[[:space:]]*$' || true)
-  case "$total" in ''|*[!0-9]*) total=0 ;; esac
-  keep=$(( total - FM_PROGRESS_FOOTER_LINES ))
-  [ "$keep" -gt 0 ] || { printf ''; return 0; }
-  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -n "$keep"
+# One digest per non-blank line of <tail>, top to bottom and dot-joined, or `-`
+# when there is none. Trailing whitespace is not part of a line, so a redraw that
+# only re-pads a row moves nothing. Byte-wise (C locale) so every awk hashes the
+# same text the same way.
+_fm_progress_line_digests() {  # <tail>
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    BEGIN { for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i }
+    /[^[:space:]]/ {
+      sub(/[[:space:]]+$/, "")
+      h = 5381
+      n = length($0)
+      for (i = 1; i <= n; i++) h = (h * 33 + ord[substr($0, i, 1)]) % 4294967296
+      out = out (out == "" ? "" : ".") sprintf("%08x", h)
+    }
+    END { print (out == "" ? "-" : out) }'
+}
+
+# 0 iff the body of the capture whose line digests are <lines> - every line above
+# the footer region - holds a line that appears nowhere in <prev-lines>.
+_fm_progress_new_body_line() {  # <lines> <prev-lines>
+  local -a all
+  local keep i=0
+  [ "$1" != - ] || return 1
+  IFS=. read -r -a all <<< "$1"
+  keep=$(( ${#all[@]} - FM_PROGRESS_FOOTER_LINES ))
+  while [ "$i" -lt "$keep" ]; do
+    case ".$2." in *".${all[$i]}."*) ;; *) return 0 ;; esac
+    i=$(( i + 1 ))
+  done
+  return 1
 }
 
 # Digest of every token-counter-looking value in <footer>, or `-` when it
@@ -133,19 +167,18 @@ _fm_progress_tokens_digest() {  # <footer>
   printf '%s' "$hits" | _fm_progress_digest
 }
 
-# The three counters of one capture, as `<footer>\t<tokens>\t<content>`.
+# The three counters of one capture, as `<footer>\t<tokens>\t<lines>`, where the
+# third is the line digests the NEXT observation compares its body against.
 # A counter the harness does not render is `-`, which compares equal to a later
 # `-` and so contributes no movement either way.
 fm_progress_counters() {  # <tail>
-  local tail=$1 footer body content footer_digest
+  local tail=$1 footer footer_digest
   footer=$(_fm_progress_footer "$tail")
-  body=$(_fm_progress_body "$tail")
-  if [ -n "$body" ]; then content=$(printf '%s' "$body" | _fm_progress_digest); else content=-; fi
   if [ -n "$footer" ]; then footer_digest=$(printf '%s' "$footer" | _fm_progress_digest); else footer_digest=-; fi
   printf '%s\t%s\t%s' \
     "$footer_digest" \
     "$(_fm_progress_tokens_digest "$footer")" \
-    "$content"
+    "$(_fm_progress_line_digests "$tail")"
 }
 
 _fm_progress_field() {  # <record> <key>
@@ -155,13 +188,13 @@ _fm_progress_field() {  # <record> <key>
 }
 
 _fm_progress_write() {  # <path> <epoch> <verdict> <counters> <advanced-ts|->
-  local path=$1 now=$2 verdict=$3 counters=$4 advanced=${5:--} footer tokens content tmp
+  local path=$1 now=$2 verdict=$3 counters=$4 advanced=${5:--} footer tokens lines tmp
   footer=${counters%%$'\t'*}
-  content=${counters##*$'\t'}
+  lines=${counters##*$'\t'}
   tokens=${counters#*$'\t'}; tokens=${tokens%%$'\t'*}
   tmp="$path.tmp.$$"
-  printf 'v1 ts=%s verdict=%s footer=%s tokens=%s content=%s advanced_ts=%s\n' \
-    "$now" "$verdict" "$footer" "$tokens" "$content" "$advanced" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  printf 'v1 ts=%s verdict=%s footer=%s tokens=%s lines=%s advanced_ts=%s\n' \
+    "$now" "$verdict" "$footer" "$tokens" "$lines" "$advanced" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
@@ -197,13 +230,17 @@ fm_progress_verdict() {  # <state-dir> <id>
 # holding a pane capture pays nothing beyond it.
 fm_progress_observe() {  # <state-dir> <id> <tail>
   local state=$1 id=$2 tail=$3 path record now ts gap counters verdict advanced
-  local prev_footer prev_tokens prev_content footer tokens content
+  local prev_footer prev_tokens prev_lines footer tokens lines
   [ -n "$id" ] || { printf 'unknown'; return 0; }
+  # A capture with nothing on it is no observation: a transient blank (a redraw,
+  # a pane mid-teardown) must neither read as movement nor become the anchor the
+  # next real capture is compared against.
+  printf '%s\n' "$tail" | grep -q '[^[:space:]]' || { printf 'unknown'; return 0; }
   path=$(fm_progress_sample_path "$state" "$id")
   now=$(date +%s)
   counters=$(fm_progress_counters "$tail")
   footer=${counters%%$'\t'*}
-  content=${counters##*$'\t'}
+  lines=${counters##*$'\t'}
   tokens=${counters#*$'\t'}; tokens=${tokens%%$'\t'*}
 
   record=$(cat "$path" 2>/dev/null || true)
@@ -230,21 +267,16 @@ fm_progress_observe() {  # <state-dir> <id> <tail>
   fi
   prev_footer=$(_fm_progress_field "$record" footer) || prev_footer=''
   prev_tokens=$(_fm_progress_field "$record" tokens) || prev_tokens=''
-  prev_content=$(_fm_progress_field "$record" content) || prev_content=''
-  if [ -z "$prev_footer" ] || [ -z "$prev_tokens" ] || [ -z "$prev_content" ]; then
+  prev_lines=$(_fm_progress_field "$record" lines) || prev_lines=''
+  if [ -z "$prev_footer" ] || [ -z "$prev_tokens" ] || [ -z "$prev_lines" ]; then
     _fm_progress_write "$path" "$now" unknown "$counters" "$advanced" || true
     printf 'unknown'
     return 0
   fi
-  if [ "$tokens" != "$prev_tokens" ] || [ "$content" != "$prev_content" ]; then
+  if [ "$tokens" != "$prev_tokens" ] || _fm_progress_new_body_line "$lines" "$prev_lines"; then
     verdict=advanced
   elif [ "$footer" != "$prev_footer" ]; then
     verdict=alive
-  elif [ "$footer$tokens$content" = '---' ] && [ "$prev_footer$prev_tokens$prev_content" = '---' ]; then
-    # Neither capture rendered a single counter, so nothing was measured and
-    # nothing moving is not evidence. Stillness has to be observed, never
-    # inferred from an unreadable surface.
-    verdict=unknown
   else
     verdict=still
   fi

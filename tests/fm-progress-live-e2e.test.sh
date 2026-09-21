@@ -105,14 +105,33 @@ capture_pane() {  # <window>
   tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$1" 2>/dev/null || true
 }
 
-# One movement verdict over <gap> seconds of a real pane.
+# One movement verdict over <gap> seconds of a real pane. Both captures are kept
+# under the sample id, because a verdict that fails is only diagnosable from the
+# two screens that produced it.
 sample_verdict() {  # <window> <sample-id>
   local win=$1 id=$2 state="$LAB/progress-state"
   mkdir -p "$state"
   fm_progress_sample_clear "$state" "$id"
-  fm_progress_observe "$state" "$id" "$(capture_pane "$win")" >/dev/null
+  capture_pane "$win" > "$LAB/$id.first"
+  fm_progress_observe "$state" "$id" "$(cat "$LAB/$id.first")" >/dev/null
   sleep "$GAP"
-  fm_progress_observe "$state" "$id" "$(capture_pane "$win")"
+  capture_pane "$win" > "$LAB/$id.second"
+  fm_progress_observe "$state" "$id" "$(cat "$LAB/$id.second")"
+}
+
+# What a failed verdict needs in order to be read from its own output: the lines
+# that differ between the two captures, and each capture's counters.
+show_sample_evidence() {  # <sample-id>
+  local id=$1 which counters
+  for which in first second; do
+    counters=$(fm_progress_counters "$(cat "$LAB/$id.$which")")
+    printf '#   %s capture counters (footer tokens lines): %s\n' "$which" \
+      "$(printf '%s' "$counters" | tr '\t' ' ' | cut -c1-120)" >&2
+    printf '#   %s capture non-blank lines: %s\n' "$which" \
+      "$(grep -c '[^[:space:]]' "$LAB/$id.$which" || true)" >&2
+  done
+  printf '#   lines that differ (< first capture, > second capture):\n' >&2
+  diff "$LAB/$id.first" "$LAB/$id.second" | sed 's/^/#   /' >&2 || true
 }
 
 wait_ready() {  # <window>
@@ -194,7 +213,7 @@ check_harness_movement() {  # <name>
     FAILED=1
     printf 'not ok - MOVEMENT BLIND: %s (%s) rendered a running turn that read "still" across %ss, which is the verdict that admits a wedge. Teach bin/fm-progress-lib.sh the footer this release renders.\n' \
       "$name" "$version" "$GAP" >&2
-    capture_pane "$win" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    show_sample_evidence "$name-working"
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
@@ -212,7 +231,7 @@ check_harness_movement() {  # <name>
     FAILED=1
     printf 'not ok - MOVEMENT INERT: %s (%s) rendered a settled pane that read "%s", not "still", so nothing on this harness would ever be admitted as a possible wedge. Something in its idle rendering moves; bin/fm-progress-lib.sh must stop counting it as movement.\n' \
       "$name" "$version" "$verdict" >&2
-    capture_pane "$win" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    show_sample_evidence "$name-settled"
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi

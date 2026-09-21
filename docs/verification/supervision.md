@@ -249,12 +249,14 @@ The verdict reads three counters across two samples and either of the two progre
 | --- | --- | --- |
 | `footer` | a digest of the last `FM_PROGRESS_FOOTER_LINES` non-blank lines | liveness only; it models no notation, so a footer this release cannot parse degrades to `alive` and never to `still` |
 | `tokens` | a progress counter read out of that footer | forward progress, where the notation is one the library recognises |
-| `content` | a digest of the rendered body above the footer | forward progress, for a harness whose footer is frozen |
+| `content` | a rendered line above the footer that appeared nowhere in the previous capture, footer included | forward progress, for a harness whose footer is frozen; a line that only changes sides of the footer boundary because another line appeared or expired inside the footer is not new output |
 
-`still` is the only verdict that admits a wedge, and it is reached only when all three counters are readable and none of them moved.
+`still` is the only verdict that admits a wedge, and it is reached only when two captures that each render something are compared and none of the three counters moved.
+A blank capture is no observation: it answers `unknown` without touching the record, so a transient blank can neither read as progress nor become the anchor the next real capture is compared against.
+A record written without the per-line digests has no comparable prior and also answers `unknown`.
 An unreadable surface answers `unknown`, which licenses nothing in either direction.
 
-Verified deterministically on 2026-09-20:
+Verified deterministically on 2026-09-21:
 
 ```sh
 tests/fm-progress-lib.test.sh
@@ -267,21 +269,23 @@ ok - an unchanged pane reports still - the only verdict that admits a wedge
 ok - a ticking turn timer alone reports alive: proof of life, not of progress
 ok - an analysis pass counting 39 -> 60 reports advanced past the one-hour bound
 ok - a surface rendering no counter reports unknown: stillness is observed, never inferred
+ok - a transient footer line appearing or expiring reads alive, never advanced
+ok - a real sample, a blank capture, then the same real capture never reads advanced
 ok - a clock-form timer and a footer notation nothing models both read as movement
 ok - a worker whose rendered output advances is not wedge-escalated, while one whose only moving part is its clock still is
 ok - a validation run reporting recent step activity is not wedge-escalated, while one reporting a quiet step still is
 ok - a crew holding a green PR is not wedge-escalated, while a failed one on the same idle pane still is
-ok - a completion is reported once per status and then bounded, while a blocker in the same shape keeps alarming
+ok - a busy pane past the completed-turn bound still wedge-escalates in a crew whose last run reads done
 ok - a retired endpoint stops at the recorded-window check, while a live window whose capture came back empty keeps its bookkeeping
 ok - a busy marker over a pane that moves nothing across two samples is not reported working, while a moving one still is
 ok - one declared wait rechecks exactly once per window across eight polls and a churning pane hash
 ok - a working run carries its own step-activity recency, and a run with no active step never reads as recent
 ```
 
-The three suites reported 14, 78, and 87 passing assertions with no failures on that run.
+`tests/fm-progress-lib.test.sh` reported 22 passing assertions with no failures on that run, and the listed `tests/fm-watch-triage.test.sh` assertions were run individually.
 
 The `tokens` and `footer` counters are read out of vendor-rendered output, so the harness-dependent-checks rule in [`firstmate-coding-guidelines`](../../.agents/skills/firstmate-coding-guidelines/SKILL.md) applies: the portable regressions above pin the classifier, and `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` proves it against every installed harness in both directions - a running turn must not read `still`, and a settled pane must.
-That guard has not yet been run against a live harness, so no dated per-harness result is claimed; its entry is owed in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence") and it is the command that establishes one.
+That guard has no passing live run on record: its attempts, including the settled-direction failure that led to the line-set content counter, are in [`runtime-backends.md`](runtime-backends.md) ("Rendered movement evidence"), and a pass in both directions is still owed.
 
 ### The declared-wait repeat, unconfirmed
 

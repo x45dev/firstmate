@@ -44,8 +44,26 @@ observe_pair() {  # <id> <first-capture> <second-capture> [gap-secs]
   fm_progress_observe "$STATE" "$id" "$first" > /dev/null
   path=$(fm_progress_sample_path "$STATE" "$id")
   ts=$(( $(date +%s) - gap ))
-  sed -i "s/ ts=[0-9]*/ ts=$ts/" "$path"
+  [ ! -e "$path" ] || sed -i "s/ ts=[0-9]*/ ts=$ts/" "$path"
   fm_progress_observe "$STATE" "$id" "$second"
+}
+
+# Age the advance on record without touching anything else, so the ceiling can
+# be tested at a real boundary rather than by waiting out a real one.
+age_advance() {  # <id> <secs>
+  local path stamp
+  path=$(fm_progress_sample_path "$STATE" "$1")
+  stamp=$(( $(date +%s) - $2 ))
+  sed -i "s/ advanced_ts=[0-9]*/ advanced_ts=$stamp/" "$path"
+}
+
+# Age the ANCHOR, so the next observation clears the minimum gap and actually
+# compares rather than reporting unknown and leaving the record alone.
+age_anchor() {  # <id> <secs>
+  local path stamp
+  path=$(fm_progress_sample_path "$STATE" "$1")
+  stamp=$(( $(date +%s) - $2 ))
+  sed -i "s/ ts=[0-9]*/ ts=$stamp/" "$path"
 }
 
 # --- a first sample establishes nothing -------------------------------------
@@ -107,6 +125,64 @@ BLANK='   '
   || fail "two captures rendering no counter at all must report unknown, not still"
 pass "a surface rendering no counter reports unknown: stillness is observed, never inferred"
 
+# --- a transient footer line is not content movement -------------------------
+
+# A harness notice that appears or expires inside the footer region slides the
+# whole capture by one line, so a line crosses between footer and body though no
+# rendered text moved. The shape is the one a live claude pane produced: the
+# notice sits above the input box, and the turn summary above it is a footer row
+# in one capture and a body row in the other.
+notice_pane() {  # <with-notice: yes|no>
+  local i
+  for i in 1 2 3 4 5 6 7 8; do printf 'scrollback line %s\n' "$i"; done
+  printf '  Worked for 11s\n'
+  [ "$1" != yes ] || printf '                    a transient harness notice\n'
+  printf '%s\n' '--------' '> ' '--------' 'model, context 12%' 'permissions line'
+}
+
+[ "$(observe_pair notice-gone "$(notice_pane yes)" "$(notice_pane no)")" = alive ] \
+  || fail "a footer notice expiring must not read as rendered progress"
+[ "$(observe_pair notice-new "$(notice_pane no)" "$(notice_pane yes)")" = alive ] \
+  || fail "a footer notice appearing must not read as rendered progress"
+pass "a transient footer line appearing or expiring reads alive, never advanced"
+
+# The same pane with genuinely new output above the footer must still count.
+NEW_LINE=$(notice_pane no)
+NEW_LINE=${NEW_LINE/'scrollback line 8'/$'scrollback line 8\n  wrote the summary file'}
+[ "$(observe_pair new-line "$(notice_pane no)" "$NEW_LINE")" = advanced ] \
+  || fail "a genuinely new rendered line must still read advanced"
+pass "a rendered line that appeared nowhere in the previous capture still reads advanced"
+
+# --- a blank capture is not an observation -----------------------------------
+
+fm_progress_sample_clear "$STATE" blanked
+fm_progress_observe "$STATE" blanked "$DEAD" > /dev/null
+age_anchor blanked 60
+before=$(cat "$(fm_progress_sample_path "$STATE" blanked)")
+[ "$(fm_progress_observe "$STATE" blanked '  ')" = unknown ] \
+  || fail "a blank capture must read unknown"
+[ "$(cat "$(fm_progress_sample_path "$STATE" blanked)")" = "$before" ] \
+  || fail "a blank capture must not replace the anchor"
+[ "$(fm_progress_observe "$STATE" blanked "$DEAD")" = still ] \
+  || fail "the real capture after a blank one must compare against the real anchor, not read advanced"
+[ "$(fm_progress_advanced_age "$STATE" blanked)" = - ] \
+  || fail "a blank capture latched an advance"
+pass "a real sample, a blank capture, then the same real capture never reads advanced"
+
+# --- a record from before the line set has no comparable prior ---------------
+
+counters=$(fm_progress_counters "$DEAD")
+old_footer=${counters%%$'\t'*}
+old_tokens=${counters#*$'\t'}; old_tokens=${old_tokens%%$'\t'*}
+printf 'v1 ts=%s verdict=still footer=%s tokens=%s content=deadbeef advanced_ts=-\n' \
+  "$(( $(date +%s) - 60 ))" "$old_footer" "$old_tokens" \
+  > "$(fm_progress_sample_path "$STATE" oldfmt)"
+[ "$(fm_progress_observe "$STATE" oldfmt "$(capture_body '  something entirely new')")" = unknown ] \
+  || fail "a record without a line set must read unknown, never advanced"
+[ "$(fm_progress_advanced_age "$STATE" oldfmt)" = - ] \
+  || fail "a record without a line set latched an advance"
+pass "a record without a line set has no comparable prior and reads unknown"
+
 # A harness that renders only prose still supplies the content counter, so its
 # stillness IS measured and must not degrade to unknown.
 PROSE=$(capture '  waiting for the reviewer')
@@ -148,7 +224,7 @@ fm_progress_sample_clear "$STATE" nored
 printf 'garbage\n' > "$(fm_progress_sample_path "$STATE" nored)"
 [ "$(fm_progress_verdict "$STATE" nored)" = unknown ] \
   || fail "a malformed record must read unknown"
-printf 'v1 ts=1 verdict=busy elapsed=a tokens=b content=c\n' \
+printf 'v1 ts=1 verdict=busy elapsed=a tokens=b lines=c\n' \
   > "$(fm_progress_sample_path "$STATE" nored)"
 [ "$(fm_progress_verdict "$STATE" nored)" = unknown ] \
   || fail "a record carrying an unrecognised verdict must read unknown"
@@ -177,24 +253,6 @@ pass "a clock-form timer and a footer notation nothing models both read as movem
 pass "an arrow-form context counter reads as advanced"
 
 # --- the advance latch ------------------------------------------------------
-
-# Age the advance on record without touching anything else, so the ceiling can
-# be tested at a real boundary rather than by waiting out a real one.
-age_advance() {  # <id> <secs>
-  local path stamp
-  path=$(fm_progress_sample_path "$STATE" "$1")
-  stamp=$(( $(date +%s) - $2 ))
-  sed -i "s/ advanced_ts=[0-9]*/ advanced_ts=$stamp/" "$path"
-}
-
-# Age the ANCHOR, so the next observation clears the minimum gap and actually
-# compares rather than reporting unknown and leaving the record alone.
-age_anchor() {  # <id> <secs>
-  local path stamp
-  path=$(fm_progress_sample_path "$STATE" "$1")
-  stamp=$(( $(date +%s) - $2 ))
-  sed -i "s/ ts=[0-9]*/ ts=$stamp/" "$path"
-}
 
 # A wedge is asked about a whole quiet window, while one sample pair only ever
 # describes the gap between two polls. A worker rendering more slowly than the
@@ -225,7 +283,7 @@ pass "the latch expires a bounded time after the movement itself stops"
 
 # A record written before the field existed carries no advance, so it defers
 # nothing. Absence of evidence stays absence of evidence in this direction too.
-printf 'v1 ts=%s verdict=advanced footer=a tokens=b content=c\n' "$(date +%s)" \
+printf 'v1 ts=%s verdict=advanced footer=a tokens=b lines=c\n' "$(date +%s)" \
   > "$(fm_progress_sample_path "$STATE" precompat)"
 [ "$(fm_progress_advanced_age "$STATE" precompat)" = - ] \
   || fail "a record with no advance on it reported one"

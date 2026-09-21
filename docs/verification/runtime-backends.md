@@ -410,8 +410,29 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 [`bin/fm-progress-lib.sh`](../../bin/fm-progress-lib.sh) decides whether a quiet pane holds a live worker or a process that has stopped, and it decides it from what the harness vendor renders.
 `FM_PROGRESS_LIVE_E2E=1 tests/fm-progress-live-e2e.test.sh` is the guard that proves that verdict against every installed harness, in both directions: two samples taken while a real turn runs must not read `still`, and two samples of the same pane once it has settled must.
 
-No dated per-harness result is recorded yet: the guard shipped with the change that introduced the library and has not been run against a live harness.
-Until it has, this guarantee rests on the portable regressions in `tests/fm-progress-lib.test.sh` and `tests/fm-watch-triage.test.sh`, recorded under [Wedge evidence](supervision.md#wedge-evidence).
+No passing run is recorded yet.
+Until one is, this guarantee rests on the portable regressions in `tests/fm-progress-lib.test.sh` and `tests/fm-watch-triage.test.sh`, recorded under [Wedge evidence](supervision.md#wedge-evidence).
+
+Attempts to date, both against claude 2.1.278 (Claude Code), the only harness this fleet dispatches:
+
+- 2026-09-21T10:54Z, at head 534bf595: the running turn read `advanced` (correct), but the settled direction FAILED - a settled pane read `advanced`, not `still` (`MOVEMENT INERT`). The only difference between the two settled captures was one right-aligned transient harness notice (`tmux focus-events off ...`) that expired between them, inside the footer region, so its expiry slid the footer boundary by one line and moved a line into the body counter's digest. The content counter now compares each body line against every line of the previous capture, footer included, so a line that only crosses the boundary is not movement; the counter regressions are in `tests/fm-progress-lib.test.sh`.
+- 2026-09-21T11:18Z, at the head that fixed it, from an isolated no-mistakes worktree that claude had never been asked to trust: the run did not reach either movement direction. It is not a pass and is not recorded as one.
+
+The second attempt, verbatim:
+
+```sh
+FM_PROGRESS_LIVE_E2E=1 FM_PROGRESS_LIVE_HARNESSES=claude bash tests/fm-progress-live-e2e.test.sh
+```
+
+```text
+not ok - claude (2.1.278 (Claude Code)): composer stayed visibly pending; no turn could be started
+not ok - live movement-evidence guard found failures above
+```
+
+The pane showed claude's folder-trust prompt ("Is this a project you created or one you trust?"), the unready state the guard correctly fails, and accepting it writes claude's user-level trust configuration, which that run was not permitted to change.
+Run it from a worktree claude already trusts to establish the dated pass in both directions.
+
+Every other harness is not run here: this fleet dispatches only claude, so no tokens are spent on runtimes nobody uses.
 
 The liveness counter models no harness's notation, so a footer this release cannot parse degrades to `alive` rather than to `still`, and a harness whose footer the progress counter does not recognise is a `# ... reads 'alive'` note in that guard's output, not a failure.
 The two failures it exists to catch are named in its output: `MOVEMENT BLIND` for a running turn read as `still`, and `MOVEMENT INERT` for a settled pane that never is.
