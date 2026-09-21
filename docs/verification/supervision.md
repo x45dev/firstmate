@@ -270,7 +270,7 @@ ok - an unchanged pane reports still - the only verdict that admits a wedge
 ok - a ticking turn timer alone reports alive: proof of life, not of progress
 ok - new rendered content reports alive even when the whole footer is frozen
 ok - an analysis pass whose token count climbs reports advanced past the one-hour bound
-ok - a hung foreground command with a static token count never reads advanced and never latches
+ok - a hung foreground command with a static token count never reads advanced and never latches, in the UTF-8 and C locales
 ok - a token counter appearing or disappearing between samples reads alive and latches nothing
 ok - a surface rendering no counter reports unknown: stillness is observed, never inferred
 ok - a transient footer line appearing or expiring reads alive, never advanced

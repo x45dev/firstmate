@@ -171,7 +171,7 @@ _fm_progress_new_body_line() {  # <lines> <prev-lines>
 _fm_progress_tokens_digest() {  # <footer>
   local hits
   hits=$(printf '%s\n' "$1" \
-    | grep -oE '[0-9][0-9.,]*[[:space:]]*[kKmM]?[[:space:]]*[Tt]okens?|[↑↓⇡⇣][^0-9]{0,4}[0-9][0-9.,]*[[:space:]]*[kKmM]?' \
+    | grep -oE '[0-9][0-9.,]*[[:space:]]*[kKmM]?[[:space:]]*[Tt]okens?|(↑|↓|⇡|⇣)[^0-9]{0,4}[0-9][0-9.,]*[[:space:]]*[kKmM]?' \
     | tr -d '[:space:]' || true)
   [ -n "$hits" ] || { printf '%s' -; return 0; }
   printf '%s' "$hits" | _fm_progress_digest

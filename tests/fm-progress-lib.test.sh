@@ -134,35 +134,47 @@ fmt_secs() {  # <secs>
   if [ "$1" -lt 60 ]; then printf '%ss' "$1"; else printf '%sm %ss' "$(( $1 / 60 ))" "$(( $1 % 60 ))"; fi
 }
 
-hung_pane() {  # <secs> <glyph> <bullet>
+hung_pane() {  # <secs> <glyph> <bullet> [tokens]
   local i
   for i in 1 2 3 4 5 6 7 8; do printf 'scrollback line %s\n' "$i"; done
   printf '%s Reading any waiting inbox messages · %s\n' "$3" "$(fmt_secs "$1")"
   printf '  ⎿ $ timeout 330 tail -f /dev/null (%s)\n\n' "$(fmt_secs "$1")"
-  printf '%s Boondoggling… (%s · ↓ 391 tokens)\n' "$2" "$(fmt_secs "$1")"
+  printf '%s Boondoggling… (%s · ↓ %s tokens)\n' "$2" "$(fmt_secs "$1")" "${4:-391}"
   printf '%s\n' '--------' '> ' '--------' 'permissions line'
 }
 
-fm_progress_sample_clear "$STATE" hung
-fm_progress_observe "$STATE" hung "$(hung_pane 19 '✢' '●')" > /dev/null
-hung_advanced=0
-hung_moved=0
-hung_bullets=('●' ' ')
-hung_glyphs=('✢' '✻' '✶' '✳')
-for hung_secs in 24 30 41 47 53 59 61 67 73 79 85 91 97 103; do
-  age_anchor hung 60
-  hung_verdict=$(fm_progress_observe "$STATE" hung \
-    "$(hung_pane "$hung_secs" "${hung_glyphs[$(( hung_secs % 4 ))]}" "${hung_bullets[$(( hung_secs % 2 ))]}")")
-  [ "$hung_verdict" != advanced ] || hung_advanced=1
-  [ "$hung_verdict" != alive ] || hung_moved=$(( hung_moved + 1 ))
-done
-[ "$hung_advanced" -eq 0 ] \
-  || fail "a hung foreground command with a static token count read advanced"
-[ "$hung_moved" -gt 0 ] \
-  || fail "the hung pane never read alive, so the fixture proved nothing"
-[ "$(fm_progress_advanced_age "$STATE" hung)" = - ] \
-  || fail "a hung foreground command latched an advance"
-pass "a hung foreground command with a static token count never reads advanced and never latches"
+# The watcher pins no locale, so the same series is observed under the UTF-8
+# locale and the C locale, where a multibyte character is several bytes and a
+# pattern that treats it as one is what would read the ticking timer as a
+# token count.
+check_hung_series() {  # <locale> <id>
+  local loc=$1 id=$2 secs verdict advanced=0 moved=0
+  local -a bullets=('●' ' ') glyphs=('✢' '✻' '✶' '✳')
+  fm_progress_sample_clear "$STATE" "$id"
+  LC_ALL=$loc fm_progress_observe "$STATE" "$id" "$(hung_pane 19 '✢' '●')" > /dev/null
+  for secs in 24 30 41 47 53 59 61 67 73 79 85 91 97 103; do
+    age_anchor "$id" 60
+    verdict=$(LC_ALL=$loc fm_progress_observe "$STATE" "$id" \
+      "$(hung_pane "$secs" "${glyphs[$(( secs % 4 ))]}" "${bullets[$(( secs % 2 ))]}")")
+    [ "$verdict" != advanced ] || advanced=1
+    [ "$verdict" != alive ] || moved=$(( moved + 1 ))
+  done
+  [ "$advanced" -eq 0 ] \
+    || fail "a hung foreground command with a static token count read advanced under $loc"
+  [ "$moved" -gt 0 ] \
+    || fail "the hung pane never read alive under $loc, so the fixture proved nothing"
+  [ "$(fm_progress_advanced_age "$STATE" "$id")" = - ] \
+    || fail "a hung foreground command latched an advance under $loc"
+  age_anchor "$id" 60
+  [ "$(LC_ALL=$loc fm_progress_observe "$STATE" "$id" "$(hung_pane 109 '✢' '●' 512)")" = advanced ] \
+    || fail "a real token-count change on the hung pane did not read advanced under $loc"
+  [ "$(fm_progress_advanced_age "$STATE" "$id")" != - ] \
+    || fail "a real token-count change did not record the advance under $loc"
+}
+
+check_hung_series en_US.UTF-8 hung
+check_hung_series C hung-c
+pass "a hung foreground command with a static token count never reads advanced and never latches, in the UTF-8 and C locales"
 
 # --- a counter appearing or disappearing is not progress ----------------------
 
