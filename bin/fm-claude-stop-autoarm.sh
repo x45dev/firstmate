@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Claude Stop-owned watcher auto-arm (asyncRewake hook).
 #
-# Registered in tracked .claude/settings.json as a Stop command hook with
-# "asyncRewake": true and an explicit multi-hour timeout. Claude Code fires it
-# in the background on EVERY Stop of a Claude primary session, with no
-# deduplication across firings. It owns routine tokenless watcher continuity
-# for Claude primaries (main home and marked secondmate homes):
+# Registered in tracked .claude/settings.json as a Stop command hook, and
+# again on StopFailure, both with "asyncRewake": true and an explicit
+# multi-hour timeout. Claude Code fires it in the background on EVERY Stop or
+# StopFailure of a Claude primary session, with no deduplication across
+# firings. It owns routine tokenless watcher continuity for Claude primaries
+# (main home and marked secondmate homes):
 #
 #   - Refused turns: the same entry is registered for StopFailure, because a
 #     turn that ends on an API error - the account's own session limit refusing
