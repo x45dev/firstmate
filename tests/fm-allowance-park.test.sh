@@ -970,7 +970,7 @@ test_refused_supervisor_turn_still_resumes_a_parked_worker() {
       FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
       FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$CASE_STATE" \
       FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-      "$harness_bin/claude" -c 'printf "%s\n" "$$" > "$FM_STATE_OVERRIDE/.lock"; exec "$FM_HOME/bin/fm-claude-stop-autoarm.sh"' \
+      "$harness_bin/claude" -c 'printf "%s\n" "$$" > "$FM_STATE_OVERRIDE/.lock"; "$FM_HOME/bin/fm-claude-stop-autoarm.sh"; rc=$?; exit "$rc"' \
       > "$CASE_DIR/refused.out" 2>&1 &
   CASE_PID=$!
   if ! wait_for_inbox "$CASE_STATE" "$name" 1 200; then
