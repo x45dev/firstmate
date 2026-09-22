@@ -585,6 +585,38 @@ test_daemon_claim_over_live_run_reads_run_alive() {
   pass "daemon/timeout blocked claim over a live fixing run reads as run alive"
 }
 
+# A run waiting on a remote service and a run nothing is executing both render a
+# still pane and an unchanging run status. The pipeline's own activity recency is
+# the only thing separating them, so a supervisor about to escalate a possible
+# wedge needs it carried on the state line rather than having to re-derive it.
+test_working_run_reports_its_step_activity_recency() {
+  reset_fakes
+  local d out; d=$(new_case run-activity-recency)
+  make_repo_on_branch "$d/wt" fm/feat-ra
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ra.meta" "window=fm:fm-feat-ra" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\n' > "$d/state/feat-ra.status"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "a fixing run with fresh activity is working"
+  assert_contains "$out" "run-activity: recent" "fresh step activity was not carried on the state line"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "a quiet fixing run is still working"
+  assert_contains "$out" "run-activity: quiet" "a quiet step was not named as quiet"
+  assert_not_contains "$out" "run-activity: recent" "a quiet step was reported as recent"
+
+  # A run with no active_steps table carries no recency at all: absence of the
+  # table is not evidence of activity, and reporting it as recent would defer the
+  # one escalation that catches a run nothing is executing.
+  FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_not_contains "$out" "run-activity: recent" "a run with no active step was reported as recently active"
+  pass "a working run carries its own step-activity recency, and a run with no active step never reads as recent"
+}
+
 # A genuine refused socket outranks the persisted fixing record, which can
 # survive after the daemon exits.
 test_socket_refusal_over_stale_fixing_run_reports_blocked() {
@@ -2487,6 +2519,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
+test_working_run_reports_its_step_activity_recency
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
 test_ordinary_blocked_over_live_run_keeps_plain_superseded

@@ -1834,6 +1834,46 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
+# Classify WHY a crew about to be wedge-escalated might not be wedged at all,
+# from one bin/fm-crew-state.sh read. Prints exactly one token:
+#   complete    the crew's work is finished and whatever remains belongs to
+#               firstmate or the captain, so its idle pane is the outcome rather
+#               than a symptom - the one state whose stillness is expected;
+#   run-active  its validation run reports RECENT activity on the step it is
+#               actually executing, so the run is parked on something remote
+#               rather than stopped (the pipeline's own last_activity recency,
+#               carried by fm-crew-state.sh as the `run-activity: recent` token,
+#               instead of a second threshold invented here);
+#   none        neither, so nothing here argues against the escalation.
+#
+# One read serves both questions, the same arrangement crew_absorb_class owns
+# for the two absorb reasons - and for the same reason: these run where the
+# watcher is ABOUT to escalate, and paying two subprocesses to ask one process
+# two questions is the cost that pushed that read off the hot path once already.
+#
+# Positive evidence only. A failed, parked, stopped, or unknown crew is idle too
+# and every one of them still has to alarm; a run with no active step, a quiet
+# one, and an unreadable verdict all answer none. Deliberately separate from
+# crew_absorb_class rather than a token added to it, because `working` and
+# `paused` license an absorb on the ordinary stale path, while these two license
+# only the narrower question of whether a wedge timer has anything to measure.
+#
+# Both verdicts were measured as false wedge alarms: two crews holding a green
+# PR for review (2026-08-24), and a run sitting on its CI step with 8 of 9 steps
+# complete and last activity 1m38s earlier (2026-09-07).
+crew_wedge_class() {  # <id>
+  local id=$1 line state
+  [ -n "$id" ] || { printf 'none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || { printf 'none'; return; }
+  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
+  state=${line#state: }; state=${state%% *}
+  if [ "$state" = "done" ]; then printf 'complete'; return; fi
+  case "$line" in
+    "state: working"*"run-activity: recent"*) printf 'run-active'; return ;;
+  esac
+  printf 'none'
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git

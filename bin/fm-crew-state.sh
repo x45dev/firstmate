@@ -810,6 +810,21 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # The pipeline's own recency verdict, carried as a stable token so a supervisor
+  # can tell a run waiting on a remote service apart from a run nothing is
+  # executing. Both render as a still pane and an unchanging run status, which is
+  # why a wedge timer reading the pane alone escalated a PR sitting on the ci
+  # step with eight of nine steps complete (2026-09-07). Reported only for a run
+  # that is genuinely mid-step, because active_steps[] is the only table that
+  # carries last_activity and an absent table is not recency.
+  if [ "$RUN_STATE" = working ]; then
+    if nm_run_activity_is_recent; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}run-activity: recent"
+    else
+      RUN_DETAIL="$RUN_DETAIL${SEP}run-activity: quiet"
+    fi
+  fi
+
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 

@@ -21,9 +21,23 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-progress-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+# Movement sampling is OFF by default for this whole suite, and the tests that
+# exercise it turn it on with FM_PROGRESS_MIN_GAP_SECS=0 of their own.
+# A fixture holds one capture file still while a test walks it through several
+# watcher processes, so whether the sampler ever gets a comparable pair depends
+# on how long the shell spent between two of them - and a still pane would then
+# answer `still`, which is a real verdict about a fixture that is not moving and
+# a wrong one about the contract under test. Pinned here the sampler answers
+# `unknown`, which licenses nothing and leaves every other contract as it was;
+# the verdict itself is pinned in tests/fm-progress-lib.test.sh and, in both
+# directions, in test_stale_busy_marker_over_an_unmoving_pane_is_not_reported_working.
+export FM_PROGRESS_MIN_GAP_SECS=999
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
@@ -426,6 +440,43 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
+# The escalation path's own classifier. Separate from crew_absorb_class because
+# it answers a narrower question - has this wedge timer anything left to measure
+# - and because every state it does NOT admit has to keep alarming.
+test_crew_wedge_class_classifier() {
+  local dir fakebin
+  dir=$(make_case wedge-class); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  [ "$(crew_wedge_class a)" = complete ] || fail "a crew holding a green PR not classed complete"
+  FM_FAKE_CREW_STATE='state: done · source: status-log · done: PR opened'
+  [ "$(crew_wedge_class a)" = complete ] || fail "a completion declared in the status log not classed complete"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · run-activity: recent'
+  [ "$(crew_wedge_class a)" = run-active ] || fail "a run reporting recent step activity not classed run-active"
+  # Every state below leaves something unresolved or unproven, and every one of
+  # them is idle. A wedge timer must keep measuring all of them.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · run-activity: quiet'
+  [ "$(crew_wedge_class a)" = none ] || fail "a run whose step is quiet was admitted"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  [ "$(crew_wedge_class a)" = none ] || fail "a run carrying no recency verdict was admitted"
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  [ "$(crew_wedge_class a)" = none ] || fail "a busy pane alone was admitted as pipeline activity"
+  FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed'
+  [ "$(crew_wedge_class a)" = none ] || fail "a failed crew was admitted as complete"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting approval'
+  [ "$(crew_wedge_class a)" = none ] || fail "a parked crew was admitted as complete"
+  FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
+  [ "$(crew_wedge_class a)" = none ] || fail "a declared wait was admitted by the wedge classifier"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  [ "$(crew_wedge_class a)" = none ] || fail "an unknown crew was admitted"
+  FM_FAKE_CREW_STATE='not a verdict line at all'
+  [ "$(crew_wedge_class a)" = none ] || fail "an unreadable verdict was admitted"
+  [ "$(crew_wedge_class "")" = none ] || fail "empty id not classed none"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_wedge_class: only a completion and a run with recent step activity are admitted; every other idle state still alarms"
 }
 
 # The wedge detector's third liveness input: writes inside the crew's own recorded
@@ -4749,6 +4800,600 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 }
 
 
+# --- movement evidence: the wedge bound quieted without being removed ---------
+#
+# The captain's settled rule: keep the one-hour catch for a job that has
+# genuinely hung, stop raising it against a job showing measurable forward
+# progress. Every test below asserts BOTH halves, because a bound that only ever
+# absorbs is not a quieter alarm, it is no alarm.
+
+# Seed <id>'s movement record from a PRIOR capture, aged so the next real poll
+# takes the second sample of a comparable pair rather than a first sight. Built
+# through the library's own public counters, so a test can never encode a
+# counter format the library does not actually read.
+#
+# It deliberately writes no advanced_ts, which also makes it the fixture for a
+# record written before that field existed: such a record carries no advance, so
+# it defers nothing. Do not add the field here without replacing that coverage.
+seed_progress_sample() {  # <state> <id> <prior-capture> [age-secs]
+  local state=$1 id=$2 prior=$3 age=${4:-60} counters footer tokens lines
+  counters=$(fm_progress_counters "$prior")
+  footer=${counters%%$'\t'*}
+  lines=${counters##*$'\t'}
+  tokens=${counters#*$'\t'}; tokens=${tokens%%$'\t'*}
+  printf 'v1 ts=%s verdict=unknown footer=%s tokens=%s lines=%s\n' \
+    "$(( $(date +%s) - age ))" "$footer" "$tokens" "$lines" \
+    > "$(fm_progress_sample_path "$state" "$id")"
+}
+
+# A pane capture of the size the watcher really takes: the library reads the last
+# few non-blank lines as the harness's status line and everything above it as
+# rendered content, so a fixture shorter than that split has no content half.
+progress_pane() {  # <body-line> <footer-line>
+  local i
+  for i in 1 2 3; do printf 'scrollback line %s\n' "$i"; done
+  printf '%s\n' "$1"
+  for i in 1 2 3 4 5; do printf 'chrome line %s\n' "$i"; done
+  printf '%s\n' "$2"
+}
+
+# One at-threshold wedge poll on an already-classified quiet hash: the repeat
+# path the worktree deferral already uses, which never re-reads the pane
+# classification and so isolates the evidence under test.
+arm_wedge_window() {  # <state> <key> <pane-text> <idle-secs>
+  local state=$1 key=$2 pane=$3 idle=$4 h back
+  h=$(hash_text "$pane")
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$h" > "$state/.stale-$key"
+  back=$(( $(date +%s) - idle ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+}
+
+# A pane that redraws its own status line faster than the watcher polls, which
+# is what every live harness actually does, with its token count held in a
+# separate file the test advances. Running the clock independently of the test
+# is what makes these phases deterministic: every poll sees a moving footer, so
+# the pane is never momentarily `still`, and the only thing that can record an
+# advance is the test moving the token count.
+start_pane_ticker() {  # <capture-file> <tokens-file> <stop-file>
+  local capture=$1 tokens=$2 stop=$3
+  : > "$stop"
+  (
+    i=0
+    while [ -e "$stop" ]; do
+      i=$(( i + 1 ))
+      progress_pane '  analysing' \
+        "Working... (${i}s) | $(cat "$tokens" 2>/dev/null || printf '39.0k') tokens" > "$capture.tmp"
+      mv -f "$capture.tmp" "$capture"
+      command sleep 0.2
+    done
+  ) >/dev/null 2>&1 & echo $!
+}
+
+stop_pane_ticker() {  # <pid> <stop-file>
+  rm -f "$2"
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+# Arm a busy over-age window whose wedge timer is ALREADY past its threshold, so
+# the next poll runs the at-threshold branch without the test having to predict
+# how long the preceding polls took. Separating the moment of judgement from the
+# sampling is what keeps these phases deterministic: the movement evidence is
+# built by real polls over a real moving pane, and only the judgement is placed.
+fire_wedge_next_poll() {  # <state> <key> <escalate-secs>
+  local back
+  back=$(( $(date +%s) - $3 - 5 ))
+  echo "$back" > "$1/.stale-since-$2"
+  set_mtime "$back" "$1/.stale-since-$2"
+}
+
+# Class 1 and 2, in both directions, on the busy over-age path - the only caller
+# that reaches the wedge timer with a pane whose bytes are still changing, and so
+# the only one where measured movement can be the thing under test.
+#
+# The shape both phases model is the one every real worker has: the harness
+# redraws its own status line on every poll while the work itself renders more
+# slowly than the poll interval. Read one sample pair at a time that worker is
+# `alive` on most polls and `advanced` on a few, so judging it by the last pair
+# alone is a coin flip on when the threshold happens to land. The latch is what
+# makes the answer hold across the window being judged - and the ceiling is what
+# stops it holding one second longer than that, which is the whole difference
+# between deferring a working pane and going blind on a dead one.
+#
+# Both phases assert on the recorded ADVANCE rather than on the verdict of
+# whichever pair a poll happened to take last: the advance is the durable half
+# and the verdict is transient, so reading the verdict would put a race in the
+# test that is not in the behaviour.
+test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock() {
+  local dir state fakebin out capture_file tokens_file stop_file window key
+  local pid ticker sig adv_first adv_later
+  dir=$(make_case wedge-measured-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  tokens_file="$dir/content.txt"; stop_file="$dir/ticking"
+  window="test:fm-progressing"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/progressing.meta"
+  record_pi_busy "$state" progressing
+  printf 'working: analysing\n' > "$state/progressing.status"
+  sig=$(seen_sig "$state/progressing.status"); printf '%s' "$sig" > "$state/.seen-progressing_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_mtime $(( $(date +%s) - 4000 )) "$state/progressing.turn-ended"
+  prime_turnend_seen "$state/progressing.turn-ended"
+
+  # Phase A: the analysis pass the captain watched advance from 39 to 60 of 99.
+  # Its token count moves once, several polls before the threshold, and only the
+  # turn timer moves after that - so the pair the threshold poll reads is not an
+  # advance, and only the latched one defers it.
+  printf '39.0k' > "$tokens_file"
+  ticker=$(start_pane_ticker "$capture_file" "$tokens_file" "$stop_file")
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=60 FM_PROGRESS_MIN_GAP_SECS=0 FM_PROGRESS_LATCH_MAX_SECS=600 \
+    FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first poll did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second poll did not complete: $(cat "$out")"; }
+  # The token advance, measured by the watcher over a live pane rather than
+  # placed on disk for it.
+  printf '60.0k' > "$tokens_file"
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the advancing poll did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the poll after the advance did not complete: $(cat "$out")"; }
+  adv_first=$(fm_progress_advanced_age "$state" progressing)
+  [ "$adv_first" != - ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the watcher did not measure the token advance as progress"; }
+  # Several more polls of the turn timer alone. The advance must survive them,
+  # which is the whole point, and must NOT be refreshed by them, which is what
+  # keeps the ceiling meaningful.
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first footer-only poll did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second footer-only poll did not complete: $(cat "$out")"; }
+  adv_later=$(fm_progress_advanced_age "$state" progressing)
+  [ "$adv_later" != - ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the measured advance was lost across the footer-only polls"; }
+  [ "$adv_later" -gt "$adv_first" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "a footer-only redraw was recorded as fresh progress (the ceiling can never expire)"; }
+  fire_wedge_next_poll "$state" "$key" 60
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the threshold poll did not complete: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "a worker advancing more slowly than one poll was wedge-escalated: $(cat "$out")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "measured progress advanced the escalation counter"; }
+  [ -e "$state/.writing-since-$key" ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the progress deferral did not open a bounded recheck window"; }
+  stop_pane_ticker "$ticker" "$stop_file"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional progress-deferral stop"
+
+  # Phase B: the same worker after its progress stops - a dead agent behind a
+  # harness that still redraws, and the shape a foreground sleep leaves behind.
+  # The advance is real and on record; it is simply older than the window being
+  # judged, and an advance that outlives its window is history, not evidence.
+  rm -f "$state/.writing-since-$key" "$state/.writing-resurfaced-$key" \
+    "$state/.wedge-escalations-$key" "$state/.stale-since-$key"
+  fm_progress_sample_clear "$state" progressing
+  printf '60.0k' > "$tokens_file"
+  ticker=$(start_pane_ticker "$capture_file" "$tokens_file" "$stop_file")
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=60 FM_PROGRESS_MIN_GAP_SECS=0 FM_PROGRESS_LATCH_MAX_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first poll of the expiry phase did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second poll of the expiry phase did not complete: $(cat "$out")"; }
+  printf '72.0k' > "$tokens_file"
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the advancing poll of the expiry phase did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the poll after the expiry-phase advance did not complete: $(cat "$out")"; }
+  [ "$(fm_progress_advanced_age "$state" progressing)" != - ] \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the expiry phase never recorded an advance to expire"; }
+  # Footer-only polls for longer than this phase's one-second ceiling.
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the first footer-only poll of the expiry phase did not complete: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" \
+    || { stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"; fail "the second footer-only poll of the expiry phase did not complete: $(cat "$out")"; }
+  fire_wedge_next_poll "$state" "$key" 60
+  if ! wait_for_exit "$pid" 200; then
+    stop_pane_ticker "$ticker" "$stop_file"; reap "$pid"
+    fail "an advance older than the ceiling still deferred the wedge (the latch has no ceiling): $(cat "$out")"
+  fi
+  stop_pane_ticker "$ticker" "$stop_file"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the expired-latch escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a measured advance defers the wedge across the window being judged, and stops deferring it once the advance is older than that window"
+}
+
+# Class 4, in both directions. A validation run parked on a remote service
+# renders exactly like a wedged one; the pipeline's own activity recency is the
+# only thing that separates them, and a run nothing is executing must still fire.
+test_wedge_deferred_for_a_run_reporting_recent_step_activity() {
+  local dir state fakebin out capture_file window key pid pane sig
+  dir=$(make_case wedge-run-activity); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-onci"
+  pane='waiting for checks'
+  printf '%s' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/onci.meta"
+  printf 'working: validating\n' > "$state/onci.status"
+  sig=$(seen_sig "$state/onci.status"); printf '%s' "$sig" > "$state/.seen-onci_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Phase A: 8 of 9 steps done, the CI step running, last activity 1m38s ago.
+  arm_wedge_window "$state" "$key" "$pane" 500
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · run-activity: recent' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a run reporting recent step activity was wedge-escalated: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a run with recent step activity still enqueued a wedge wake"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional run-activity stop"
+
+  # Phase B: the same run, the same pane, but the pipeline reports its step
+  # quiet. Nothing is executing, so the bound is the only thing that catches it.
+  rm -f "$state/.writing-since-$key" "$state/.writing-resurfaced-$key"
+  arm_wedge_window "$state" "$key" "$pane" 500
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · run-activity: quiet' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a run whose step reports no recent activity did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the quiet-run escalation did not flag a possible wedge"
+  pass "a validation run reporting recent step activity is not wedge-escalated, while one reporting a quiet step still is"
+}
+
+# Class 3, at the wedge timer. A finished crew's pane is idle BECAUSE the work
+# landed and the only remaining action is firstmate's or the captain's, so its
+# stillness is the outcome rather than a symptom. Every other terminal verb
+# leaves something unresolved and must keep alarming.
+test_completed_crew_is_not_wedge_escalated_but_a_failed_one_is() {
+  local dir state fakebin out capture_file window key pid pane sig
+  dir=$(make_case wedge-completed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-finished"
+  pane='PR opened, nothing left to do'
+  printf '%s' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/finished.meta"
+  printf 'working: shipping\n' > "$state/finished.status"
+  sig=$(seen_sig "$state/finished.status"); printf '%s' "$sig" > "$state/.seen-finished_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Phase A: the measured case - "checks green: PR ready for review".
+  arm_wedge_window "$state" "$key" "$pane" 500
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a crew holding a green PR was wedge-escalated: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a completed crew still enqueued a wedge wake"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a completed crew advanced the escalation counter"; }
+  [ ! -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "completion opened a recheck window instead of suppressing the alarm"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional completion stop"
+
+  # Phase B: a failed run on the same idle pane. The work stopped with something
+  # unresolved, which is the case the wedge bound exists for.
+  arm_wedge_window "$state" "$key" "$pane" 500
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a failed crew on an idle pane did not wedge-escalate"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the failed-crew escalation did not flag a possible wedge"
+  pass "a crew holding a green PR is not wedge-escalated, while a failed one on the same idle pane still is"
+}
+
+# The bound the completion suppression must not take away. A crew whose last run
+# passed reads `done` even after the captain steers it to address review
+# comments, so a busy pane inside an open turn can read complete while its
+# foreground call hangs. The busy completed-turn bound is the one catch for that,
+# and it has to keep firing.
+test_busy_pane_past_the_turn_bound_still_escalates_in_a_crew_reading_done() {
+  local dir state fakebin out capture_file window key pid sig
+  dir=$(make_case wedge-busy-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-done"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-done.meta"
+  record_pi_busy "$state" busy-done
+  printf 'working: addressing review comments\n' > "$state/busy-done.status"
+  sig=$(seen_sig "$state/busy-done.status"); printf '%s' "$sig" > "$state/.seen-busy-done_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'Working...')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  touch -t 200001010000 "$state/busy-done.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a busy pane past the turn bound was suppressed because its crew reads done"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the busy escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a busy pane past the completed-turn bound still wedge-escalates in a crew whose last run reads done"
+}
+
+# Class 5. A crew stopped through the control plane leaves a recorded endpoint
+# that no longer exists. The escalation has to stop at that check, before
+# anything reads a pane that is gone, and without discarding a live window whose
+# capture merely failed once.
+test_retired_endpoint_stops_before_reading_a_pane() {
+  local dir state fakebin out window key pid sig capture_file retirements
+  dir=$(make_case retired-endpoint); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-retired"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/retired.meta"
+  printf 'working: implementing\n' > "$state/retired.status"
+  sig=$(seen_sig "$state/retired.status"); printf '%s' "$sig" > "$state/.seen-retired_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The window is still the one this home recorded, but the backend no longer
+  # lists it - which is exactly what a torn-down endpoint looks like, and what
+  # the control plane leaves behind when it stops a worker.
+  printf '%s' "$(hash_text 'whatever it last showed')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text 'whatever it last showed')" > "$state/.stale-$key"
+  echo "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  : > "$state/.paused-$key"
+  : > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_WINDOWS='some-other-window' \
+    FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a retired endpoint was escalated instead of stopping at the recorded-window check: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a retired endpoint enqueued a wake"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a retired endpoint kept a wedge timer running against a pane that is gone"; }
+  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "a retired endpoint kept its pause bookkeeping"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+
+  # The other direction: the window IS still there and the capture merely came
+  # back empty. Absence has to be positive, so this window is still read and
+  # tracked rather than written off as retired. What it is then triaged as is
+  # the ordinary stale contract's business and deliberately not asserted here;
+  # only the retirement verdict belongs to this test.
+  retirements=$(grep -c 'recorded endpoint is gone' "$state/.watch-triage.log" 2>/dev/null || echo 0)
+  arm_wedge_window "$state" "$key" '' 500
+  : > "$state/.paused-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || true
+  reap "$pid"
+  [ "$(grep -c 'recorded endpoint is gone' "$state/.watch-triage.log" 2>/dev/null || echo 0)" -eq "$retirements" ] \
+    || fail "a live window with an empty capture was written off as retired"
+  [ -s "$state/.hash-$key" ] \
+    || fail "a live window with an empty capture stopped being tracked at all"
+  pass "a retired endpoint stops at the recorded-window check, while a live window whose capture came back empty keeps its bookkeeping"
+}
+
+# The opposite error, and the expensive one. A harness that marks a turn open and
+# then dies leaves that marker set forever, and reading it as "working" reported
+# a crew that did not exist for four and a half hours. Two samples with nothing
+# moving is what tells the two apart.
+test_stale_busy_marker_over_an_unmoving_pane_is_not_reported_working() {
+  local dir state fakebin out capture_file window key pid pane sig
+  dir=$(make_case false-alive-busy-marker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-falsealive"
+  pane='esc to interrupt
+Working... (412s)'
+  printf '%s' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/falsealive.meta"
+  record_pi_busy "$state" falsealive
+  printf 'working: implementing\n' > "$state/falsealive.status"
+  sig=$(seen_sig "$state/falsealive.status"); printf '%s' "$sig" > "$state/.seen-falsealive_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: the busy marker is set and NOTHING has moved across two samples.
+  # The pane must be admitted to stale triage rather than treated as working.
+  seed_progress_sample "$state" falsealive "$pane"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROGRESS_MIN_GAP_SECS=0 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a set busy marker over a pane that moved nothing was still reported as working"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the unmoving busy pane printed no stale wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the false-alive wake"
+
+  # Phase B: the same set marker over a pane that IS moving. A live worker on a
+  # long turn must stay absorbed, or this gate would surface the fleet's real work.
+  printf '%s' "$pane" > "$capture_file"
+  seed_progress_sample "$state" falsealive 'esc to interrupt
+Working... (350s)'
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  rm -f "$state/.stale-$key" "$state/.stale-since-$key"
+  : > "$out"
+  # One poll only. A fixture's capture file cannot change underneath a running
+  # watcher, so a second poll would compare this pane against itself and report
+  # the stillness the fixture created rather than the movement under test. The
+  # poll interval is long enough to hold the second poll off past the liveness
+  # window below, and short enough that the stand-down still lands inside its
+  # own bound rather than waiting out a long sleep.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PROGRESS_MIN_GAP_SECS=0 FM_BUSY_TURN_MAX_SECS=999999 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=6 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 25 || fail "a busy pane that moved between samples was surfaced as a stopped worker: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a moving busy pane enqueued a wake"; }
+  reap "$pid"
+  pass "a busy marker over a pane that moves nothing across two samples is not reported working, while a moving one still is"
+}
+
+# The pure verdict read backs window_is_busy's refusal of a busy claim, so only a
+# recently established `still` may refuse it. The watcher stops sampling a window
+# it no longer reads a pane for, which leaves that window's last verdict on disk;
+# a mate that resumes work inside an open turn must not be read through it.
+test_stale_still_verdict_does_not_refuse_a_busy_claim() (
+  local dir state stamp
+  dir=$(make_case aged-still-verdict); state="$dir/state"
+  printf 'window=test:fm-agedstill\nkind=ship\nharness=pi\n' > "$state/agedstill.meta"
+  record_pi_busy "$state" agedstill
+  FM_HOME="$dir/home"; FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+
+  write_still_record() {  # <age-secs>
+    printf 'v1 ts=%s verdict=still footer=a tokens=b lines=c advanced_ts=-\n' \
+      "$(( $(date +%s) - $1 ))" > "$(fm_progress_sample_path "$state" agedstill)"
+  }
+
+  write_still_record 60
+  window_is_busy test:fm-agedstill 'Working...' \
+    && fail "a freshly established still verdict did not refuse the busy claim"
+  [ "$(fm_progress_verdict "$state" agedstill)" = still ] \
+    || fail "a fresh still record did not read still"
+
+  # shellcheck disable=SC2153 # Defined by the sourced progress library.
+  write_still_record $(( FM_PROGRESS_MAX_GAP_SECS + 60 ))
+  [ "$(fm_progress_verdict "$state" agedstill)" = unknown ] \
+    || fail "a still record older than the maximum gap still read still"
+  window_is_busy test:fm-agedstill 'Working...' \
+    || fail "a still verdict from an unrelated earlier episode refused a live busy claim"
+  pass "only a recently established still verdict refuses a busy claim; one older than the maximum gap reads unknown"
+)
+
+# Deliverable 6's regression, and the shape the 2026-09-11 repeat violated: one
+# declared wait, many polls, a pane hash that churns and settles, exactly one
+# recheck per window. Ported from the controlled reproduction built while
+# investigating that incident, which this HEAD passes.
+test_declared_wait_rechecks_once_per_window_across_pane_churn() {
+  local dir state fakebin out window key sig round wakes
+  dir=$(make_case declared-wait-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; window="test:fm-parked"
+  printf 'window=%s\nkind=ship\nharness=grok\n' "$window" > "$state/parked.meta"
+  printf 'paused: waiting on the captain to merge\n' > "$state/parked.status"
+  sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_mtime "$(( $(date +%s) - 7200 ))" "$state/parked.status"
+  : > "$out"
+
+  # Round 1 is the recheck this cadence owes. Every later round is inside the
+  # same window against the same unchanged declaration, churning hash or not.
+  printf 'parked, tick 1' > "$dir/pane.txt"
+  parked_watch_round "$state" "$fakebin" "$out" "$dir/pane.txt" "$window" exit \
+    || fail "the declared wait's own recheck never fired"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the declared wait's recheck"
+  for round in 2 3 4 5 6 7 8; do
+    case "$round" in
+      2|4|6|8) printf 'parked, tick %s' "$round" > "$dir/pane.txt" ;;
+    esac
+    parked_watch_round "$state" "$fakebin" "$out" "$dir/pane.txt" "$window" absorb \
+      || fail "the declared wait re-surfaced inside its own window at round $round: $(cat "$out")"
+  done
+  wakes=$(grep -c -F "stale: $window" "$out" || true)
+  [ "$wakes" = 1 ] || fail "one declared wait produced $wakes rechecks in one window, not 1"
+  [ ! -s "$state/.wake-queue" ] || fail "a bounded declared wait left extra wakes queued"
+  pass "one declared wait rechecks exactly once per window across eight polls and a churning pane hash"
+}
+
+# The instrumentation that captures the next occurrence of the 2026-09-11
+# repeat. No behaviour depends on it, so the assertion is that the evidence is
+# recorded, and that an ordinary cadence records nothing.
+test_resurface_records_an_anchor_that_moved() {
+  local dir state fakebin out window key sig marker log pane
+  dir=$(make_case resurface-anchor-audit); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; window="test:fm-anchor"; log="$state/.watch-triage.log"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/anchor.meta"
+  printf 'paused: waiting on the captain to merge\n' > "$state/anchor.status"
+  sig=$(seen_sig "$state/anchor.status"); printf '%s' "$sig" > "$state/.seen-anchor_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  marker="$state/.paused-resurfaced-$key"
+  set_mtime "$(( $(date +%s) - 7200 ))" "$state/anchor.status"
+
+  # The agent has exited under its own declared wait, which is the path whose
+  # reason line carries the age the 2026-09-11 records disagreed about.
+  anchor_round() {  # <pane-text>
+    local pid
+    pane=$1
+    printf '%s' "$pane" > "$dir/pane.txt"
+    printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  }
+
+  # Fire once: nothing to compare against, so nothing is reported.
+  anchor_round 'parked, tick 1' || fail "the first recheck never fired"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    || fail "the first recheck did not use the bounded paused cadence: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first recheck"
+  [ -s "$marker.anchor" ] || fail "the first recheck recorded no anchor to compare the next one against"
+  grep -F 'resurface anchor moved' "$log" >/dev/null 2>&1 \
+    && fail "a single recheck reported a moved anchor with nothing to compare against"
+
+  # Fire again with the anchor pulled forward under it, which is the tell: the
+  # reported age goes DOWN across a gap that only moves forward.
+  set_mtime "$(( $(date +%s) - 3600 ))" "$state/anchor.status"
+  sig=$(seen_sig "$state/anchor.status"); printf '%s' "$sig" > "$state/.seen-anchor_status"
+  rm -f "$marker" "$state/.stale-$key"
+  anchor_round 'parked, tick 2' || fail "the second recheck never fired"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second recheck"
+  grep -F 'resurface anchor moved' "$log" >/dev/null \
+    || fail "a recheck whose anchor moved forward under it recorded no evidence"
+
+  # A fresh declaration legitimately restarts the age, and it re-surfaces at once
+  # because its scope differs from the recheck before it. Its smaller age is a new
+  # wait and not the tell, so nothing further may be recorded.
+  printf 'paused: waiting on a second, different review\n' >> "$state/anchor.status"
+  set_mtime "$(( $(date +%s) - 20 ))" "$state/anchor.status"
+  sig=$(seen_sig "$state/anchor.status"); printf '%s' "$sig" > "$state/.seen-anchor_status"
+  rm -f "$state/.stale-$key"
+  anchor_round 'parked, tick 3' || fail "a new declaration after a recheck never re-surfaced"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    || fail "the new declaration did not use the bounded paused cadence: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the new declaration's recheck"
+  [ "$(grep -c -F 'resurface anchor moved' "$log")" -eq 1 ] \
+    || fail "a legitimate new declaration was logged as the repeat-fire tell: $(cat "$log")"
+  pass "a recheck records what it was anchored on, says so when the next one is anchored later, and does not mistake a new declaration for it"
+}
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -4758,6 +5403,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_wedge_class_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
@@ -4862,3 +5508,12 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_wedge_deferred_for_measured_progress_not_for_a_ticking_clock
+test_wedge_deferred_for_a_run_reporting_recent_step_activity
+test_completed_crew_is_not_wedge_escalated_but_a_failed_one_is
+test_busy_pane_past_the_turn_bound_still_escalates_in_a_crew_reading_done
+test_retired_endpoint_stops_before_reading_a_pane
+test_stale_busy_marker_over_an_unmoving_pane_is_not_reported_working
+test_stale_still_verdict_does_not_refuse_a_busy_claim
+test_declared_wait_rechecks_once_per_window_across_pane_churn
+test_resurface_records_an_anchor_that_moved
