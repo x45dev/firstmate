@@ -922,6 +922,76 @@ test_watcher_resumes_the_same_notice_again_at_its_next_reset() {
   pass "the same notice either side of a reset is two parks, and the second is resumed once its own reset has passed"
 }
 
+# The supervisor's own turn is refused by the same account limit. That is the
+# shape of 2026-09-21: the watcher surfaced a worker's session-record park, the
+# turn that should have handled it was refused seconds later, and a refused turn
+# ends in StopFailure rather than Stop. Nothing polled again until a person typed
+# into the supervisor seven hours after the reset, so the resume below never ran.
+# Here the refused turn fires the real auto-arm with a StopFailure payload, and
+# the watcher it starts must reach the poll that resumes the worker once the
+# reset passes, instead of re-announcing the wake the refused turn never took.
+test_refused_supervisor_turn_still_resumes_a_parked_worker() {
+  local now name=allowance-refused-supervisor primary harness_bin rc=0
+  command -v jq >/dev/null 2>&1 \
+    || fail "jq is missing, so the provider gate could not be exercised - this is not a pass"
+  now=$(date -u +%s)
+  # One reset throughout, so this stays one park episode: while the provider
+  # still reports the allowance spent, the park is surfaced and nothing is sent.
+  build_parked_case "$name" parked 'Running tests (esc to interrupt)' "$(( now - 1800 ))" "$(( now - 3600 ))"
+  printf spent > "$CASE_DIR/quota-verdict"
+  install_fake_quota "$CASE_DIR/fakebin" "$CASE_DIR/quota-verdict"
+  launch_case_watcher "$CASE_DIR/watch.out"
+  wait_for_exit "$CASE_PID" 100 \
+    || { reap "$CASE_PID"; fail "the watcher never surfaced the park: $(cat "$CASE_OUT")"; }
+  grep -Fq "session-record signal" "$CASE_OUT" \
+    || fail "the fixture did not surface a session-record park: $(cat "$CASE_OUT")"
+  [ "$(inbox_count "$CASE_STATE" "$name")" -eq 0 ] \
+    || fail "the worker was messaged before its reset, so nothing below is attributable to the refused turn"
+
+  # The handling turn was refused, so that wake is never acknowledged. Then the
+  # account's headroom comes back.
+  printf ready > "$CASE_DIR/quota-verdict"
+
+  # A primary checkout for the auto-arm's scope gate, running this tree's scripts.
+  primary="$CASE_DIR/primary"
+  mkdir -p "$primary"
+  git init -q "$primary"
+  git -C "$primary" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+  : > "$primary/AGENTS.md"
+  cp -R "$ROOT/bin" "$primary/bin"
+  harness_bin="$CASE_DIR/harness"
+  mkdir -p "$harness_bin"
+  ln -s /bin/bash "$harness_bin/claude"
+  # shellcheck disable=SC2016 # Expand in the fake harness shell, which owns the lock.
+  printf '%s\n' '{"session_id":"sess-refused","hook_event_name":"StopFailure","error":"rate_limit"}' \
+    | PATH="$CASE_DIR/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$CASE_WINDOW" \
+      FM_FAKE_TMUX_CAPTURE="$CASE_CAPTURE" CLAUDE_CONFIG_DIR="$CASE_DIR/store" \
+      FM_CREW_STATE_BIN="$CASE_DIR/fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+      FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$CASE_STATE" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$harness_bin/claude" -c 'printf "%s\n" "$$" > "$FM_STATE_OVERRIDE/.lock"; exec "$FM_HOME/bin/fm-claude-stop-autoarm.sh"' \
+      > "$CASE_DIR/refused.out" 2>&1 &
+  CASE_PID=$!
+  if ! wait_for_inbox "$CASE_STATE" "$name" 1 200; then
+    printf 'done: fixture cleanup\n' > "$CASE_STATE/cleanup.status"
+    wait_for_exit "$CASE_PID" 100 >/dev/null 2>&1 || true
+    fail "a refused supervisor turn left the parked worker stopped past its reset: $(cat "$CASE_DIR/refused.out")"
+  fi
+  ! grep -Fq 'rearm-resurface' "$CASE_DIR/refused.out" \
+    || fail "the refused turn's watcher re-announced the wake it never took instead of supervising"
+
+  # Anything new still reaches the session: the watcher is live and its next
+  # wake is delivered as the ordinary exit-2 rewake.
+  printf 'done: a later event\n' > "$CASE_STATE/later.status"
+  wait_for_exit "$CASE_PID" 100 || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "the refused turn's watcher did not rewake the session on a later event (exit $rc): $(cat "$CASE_DIR/refused.out")"
+  grep -Fq 'later.status' "$CASE_DIR/refused.out" \
+    || fail "the rewake did not carry the later event: $(cat "$CASE_DIR/refused.out")"
+  pass "a supervisor turn refused on the account limit still resumes a parked worker at its reset"
+}
+
 test_watcher_surfaces_a_fresh_pane_park_beside_an_old_resolved_refusal() {
   local now fresh
   now=$(date -u +%s)
@@ -962,3 +1032,4 @@ test_watcher_leaves_a_worker_alone_once_it_has_moved_past_its_reset
 test_watcher_retries_a_resume_that_did_not_take_when_no_reset_is_recorded
 test_watcher_resumes_the_same_notice_again_at_its_next_reset
 test_watcher_surfaces_a_fresh_pane_park_beside_an_old_resolved_refusal
+test_refused_supervisor_turn_still_resumes_a_parked_worker

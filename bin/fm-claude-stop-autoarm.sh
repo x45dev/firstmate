@@ -7,6 +7,20 @@
 # deduplication across firings. It owns routine tokenless watcher continuity
 # for Claude primaries (main home and marked secondmate homes):
 #
+#   - Refused turns: the same entry is registered for StopFailure, because a
+#     turn that ends on an API error - the account's own session limit refusing
+#     the handling turn - fires StopFailure INSTEAD of Stop. Registered on Stop
+#     alone, the watcher that delivered that wake was never replaced, so nothing
+#     polled until someone typed into the session, and a worker parked on the
+#     same limit was never resumed at its reset (bin/fm-allowance-resume-lib.sh
+#     runs inside the watcher's poll). A refused turn handled nothing, so its
+#     arm runs as a handling successor (FM_WATCH_PREDECESSOR_ARM_PID): a plain
+#     arm re-announces the still-unacknowledged wake at once, which would only
+#     buy another refused turn, round and round, without ever reaching the poll
+#     that resumes anyone. The wake stays queued, the next new wake rewakes the
+#     session, and the first turn the provider accepts drains everything.
+#     docs/verification/supervision.md holds the live evidence that an exit 2
+#     from this event rewakes Claude.
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
@@ -124,6 +138,16 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
 # its turn boundary, so stand down on a Cursor-delivered payload.
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+
+# A refused turn (see "Refused turns" above) arms as the successor of the last
+# closed arm cycle. The cycle ledger is bin/fm-watch-arm.sh's; a missing or
+# unreadable one still arms as a successor, and only the ledger link is lost.
+ARM_PREDECESSOR=
+if printf '%s' "$PAYLOAD" | grep -Eq '"hook_event_name"[[:space:]]*:[[:space:]]*"StopFailure"'; then
+  ARM_PREDECESSOR=$(tail -n 1 "$STATE/.watch-cycle-exits.log" 2>/dev/null \
+    | awk -F '\t' '$1 ~ /^arm_pid=[0-9]+$/ { sub(/^arm_pid=/, "", $1); print $1 }')
+  [ -n "$ARM_PREDECESSOR" ] || ARM_PREDECESSOR=none
+fi
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
@@ -328,9 +352,11 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
   if [ -n "$OUT" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" FM_WATCH_PREDECESSOR_ARM_PID="$ARM_PREDECESSOR" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" FM_WATCH_PREDECESSOR_ARM_PID="$ARM_PREDECESSOR" \
+      "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress

@@ -1138,6 +1138,38 @@ test_need_vanished_mid_cycle_closes_quietly() {
   pass "auto-arm: need vanishing mid-cycle closes without a rewake"
 }
 
+# A turn that ends on an API error - the account's own session limit refusing
+# the handling turn - fires StopFailure INSTEAD of Stop. If only Stop arms, the
+# watcher that just delivered that wake is never replaced, and nothing polls
+# until someone types into the session: parked workers are never resumed and no
+# later wake can arrive. So the tracked registration itself is exercised here:
+# every asyncRewake StopFailure command it declares is run as Claude would run
+# it, with a StopFailure payload, and one of them must arm and rewake.
+test_refused_turn_arms_through_the_tracked_stopfailure_registration() {
+  local dir out status cmd armed=0
+  dir=$(make_primary_dir "$TMP_ROOT/stopfailure")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    rm -f "$dir/state/arm-ran" "$dir/state/.claude-autoarm-epoch"
+    out=$(printf '%s\n' '{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"rate_limit"}' \
+      | env -u GROK_AGENT -u GROK_HOOK_EVENT FM_HOME="$dir" CLAUDE_PROJECT_DIR="$dir" HOOK_CMD="$cmd" "$FAKE_CLAUDE" -c '
+          printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+          bash -c "$HOOK_CMD"
+        ' 2>&1); status=$?
+    if [ -e "$dir/state/arm-ran" ]; then
+      armed=1
+      expect_code 2 "$status" "a refused turn's actionable arm close must exit 2 so Claude rewakes"
+      assert_contains "$out" "stale: fixture-win actionable" "the refused-turn rewake must carry the arm's reason line"
+      [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+    fi
+  done < <(jq -r '.hooks.StopFailure[]?.hooks[]? | select(.asyncRewake == true) | .command' "$ROOT/.claude/settings.json")
+  [ "$armed" = 1 ] \
+    || fail "no asyncRewake StopFailure hook in .claude/settings.json armed the watcher, so a turn refused on the account allowance leaves supervision down until someone types"
+  pass "auto-arm: a turn refused by an API error re-arms and rewakes through the tracked StopFailure registration"
+}
+
 test_afk_mid_cycle_suppresses_rewake() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/afk-mid")
@@ -1308,6 +1340,7 @@ test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
+test_refused_turn_arms_through_the_tracked_stopfailure_registration
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper

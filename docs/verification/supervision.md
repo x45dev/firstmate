@@ -504,6 +504,7 @@ A resume that did not take leaves the worker parked and refused again on an iden
 
 The resume runs inside the watcher's own poll, so it can only help while supervision is polling.
 When the watcher is not running, or is not the build that carries this change, nothing resumes a parked worker, and the fixture tests below imply no cover for that case.
+The one way the limit itself stops the poll is covered, in [The supervisor's own refused turn](#the-supervisors-own-refused-turn-2026-09-22) below.
 
 Deterministic entry point:
 
@@ -521,6 +522,28 @@ FM_ALLOWANCE_PARK_DRIFT=1 tests/fm-allowance-park-live-e2e.test.sh
 
 That guard proves the store derivation still lands where the harness writes and that a healthy worker is not classified as parked.
 It deliberately does not prove that a real refusal still writes the matched fields, because forcing one means exhausting the account allowance, which is the outage this detection exists to shorten; that half is refreshed by capturing the next real refusal against the counts above.
+
+### The supervisor's own refused turn, 2026-09-22
+
+The account limit that parks workers also refuses the supervising session's handling turn, and on Claude Code 2.1.278 a turn ended by an API error fires `StopFailure` instead of `Stop`.
+With the auto-arm registered on `Stop` alone, the watcher that delivered the wake exited and nothing re-armed it, so no poll ran to carry the resume.
+On 2026-09-21 two workers stayed parked about seven hours past a 14:40Z reset, and the primary transcript shows its handling turn at 11:47:07Z ended on the refusal without a Stop hook summary:
+
+```sh
+jq -rs '[.[] | select(.type=="assistant" or (.type=="system" and (.subtype=="turn_duration" or .subtype=="stop_hook_summary")))] as $r | range(1; $r|length) as $i | select($r[$i].subtype=="turn_duration" and $r[$i-1].subtype!="stop_hook_summary") | "\($r[$i].timestamp) turn ended without Stop hooks; last assistant record isApiErrorMessage=\($r[$i-1].isApiErrorMessage // false) error=\($r[$i-1].error // "none")"' <primary-session>.jsonl
+# 2026-09-20T13:15:56.856Z turn ended without Stop hooks; last assistant record isApiErrorMessage=true error=rate_limit
+# 2026-09-21T11:47:07.365Z turn ended without Stop hooks; last assistant record isApiErrorMessage=true error=rate_limit
+```
+
+The tracked settings now register `bin/fm-claude-stop-autoarm.sh` on `StopFailure` with `asyncRewake`, and there it arms as a handling successor.
+A plain arm re-announces the unacknowledged wake as `check: rearm-resurface` on every start, which against a still-limited account would be one refused turn per poll.
+`tests/fm-allowance-park.test.sh` drives the real auto-arm and watcher through that sequence against a session-record park and asserts the resume record lands with no re-announcement, and `tests/fm-claude-stop-autoarm.test.sh` runs the tracked `StopFailure` command itself.
+The harness half is the live guard, which spends no model tokens because every turn is refused as `model_not_found` before reaching a model:
+
+```sh
+tests/fm-claude-stopfailure-rewake-live-e2e.test.sh
+# ok - claude (2.1.278 (Claude Code)): a refused turn re-arms through StopFailure as a handling successor and its rewake is delivered (4 arms, 2 rewakes)
+```
 
 ### What the resume has and has not been proven against
 
