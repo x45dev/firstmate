@@ -10,6 +10,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-progress-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -521,7 +523,7 @@ SH
     || fail "could not arm the mate's busy contract"
   # A still verdict from the stretch the mate spent paused: well inside the
   # maximum sample gap, so only the watcher dropping it can stop it refusing.
-  sample=$(. "$ROOT/bin/fm-progress-lib.sh"; fm_progress_sample_path "$state" mate)
+  sample=$(fm_progress_sample_path "$state" mate)
   printf 'v1 ts=%s verdict=still footer=a tokens=b lines=c advanced_ts=-\n' \
     "$(( $(date +%s) - 30 ))" > "$sample"
 
