@@ -23,7 +23,11 @@
 #
 # The resume runs inside the watcher's own poll (bin/fm-watch.sh), so it can only
 # help while supervision is polling: when the watcher is not running, or is not
-# the build that carries this, nothing resumes a parked worker.
+# the build that carries this, nothing resumes a parked worker. The same limit can
+# refuse the supervising session's own handling turn, and a Claude primary then
+# re-arms the watcher through StopFailure rather than Stop
+# (bin/fm-claude-stop-autoarm.sh), so the poll that carries the resume keeps
+# running while the account is limited.
 #
 # Two gates, and the resume fires only when both are satisfied:
 #
