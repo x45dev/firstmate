@@ -25,8 +25,8 @@
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
-#   - firstmate-behind-fleet: no | yes: <reason>  (was the PRIMARY skipped while a
-#     mate it leads ended up on the new commit)
+#   - firstmate-behind-fleet: no | yes: <reason>  (is the PRIMARY skipped with its HEAD
+#     strictly behind origin's tip, where a mate it leads was left)
 #   - restart-secondmates: fm-<id>...|none (every live secondmate this pass left
 #     on origin's tip - advanced OR already there - whose recorded runtime can
 #     prove a restart)
@@ -220,7 +220,16 @@ fi
 # than leaving it to be spotted among the per-target lines.
 firstmate_behind="no"
 if [ "$primary_status" = "skipped" ] && [ "$FF_SETTLED_COUNT" -gt 0 ]; then
-  firstmate_behind="yes: $primary_skip_reason"
+  case "$primary_skip_reason" in
+    "no origin remote"|"fetch failed"|"cannot determine default branch"|"not a directory"|"not a git repo") ;;
+    *)
+      primary_base="origin/$(default_branch "$FM_ROOT" 2>/dev/null || true)"
+      if git -C "$FM_ROOT" rev-parse --verify --quiet "$primary_base^{commit}" >/dev/null \
+        && git -C "$FM_ROOT" merge-base --is-ancestor HEAD "$primary_base" 2>/dev/null \
+        && [ "$(git -C "$FM_ROOT" rev-parse HEAD)" != "$(git -C "$FM_ROOT" rev-parse "$primary_base")" ]; then
+        firstmate_behind="yes: $primary_skip_reason"
+      fi ;;
+  esac
 fi
 
 # claim_settled_secondmate puts each live settled mate in exactly one set, so the

@@ -545,6 +545,22 @@ test_untracked_collision_is_skipped_not_clobbered() {
   pass "T14 an untracked file in the fast-forward's way is reported, never overwritten"
 }
 
+# --- T15: a skipped primary that is not behind origin is not reported behind ----
+test_skipped_primary_not_behind_is_not_reported() {
+  local w out
+  w=$(new_world t15)
+  add_sm "$w" sm1
+  git -C "$w/main" checkout -q -b feature/wip
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: on feature/wip" "a primary on a feature branch is skipped"
+  assert_contains "$out" "secondmate sm1: already current" "the mate is already at the unmoved origin tip"
+  assert_contains "$out" "firstmate-behind-fleet: no" \
+    "a skipped primary that is not strictly behind origin must not be reported behind"
+  pass "T15 a skipped primary that is not behind origin is not reported behind"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
@@ -562,5 +578,6 @@ test_unsafe_secondmate_home_skipped_before_git_update
 test_untracked_only_primary_still_updates
 test_tracked_dirty_primary_is_reported_behind_fleet
 test_untracked_collision_is_skipped_not_clobbered
+test_skipped_primary_not_behind_is_not_reported
 
 echo "# all fm-update tests passed"
