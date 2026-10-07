@@ -471,6 +471,80 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: untracked-only dirt does not hold the primary behind its mates -----
+# The observed inversion: stray untracked notes in the primary's repo root held
+# it at an older commit while every mate advanced. A fast-forward only writes
+# tracked paths, so untracked files are not a reason to refuse one.
+test_untracked_only_primary_still_updates() {
+  local w out
+  w=$(new_world t12)
+  add_sm "$w" sm1
+  bump_origin "$w" instr
+  printf 'stray note\n' > "$w/main/notes-2026-08-27.md"
+  printf 'stray note\n' > "$w/main/notes-2026-08-28.md"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "untracked-only dirt must not refuse the primary's fast-forward"
+  assert_contains "$out" "secondmate sm1: updated " "the mate still advances"
+  assert_contains "$out" "reread-firstmate: yes" "the advanced instruction surface is still reported"
+  assert_contains "$out" "firstmate-behind-fleet: no" "an advanced primary is not behind its fleet"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "primary did not fast-forward past untracked-only dirt"
+  grep -q 'stray note' "$w/main/notes-2026-08-27.md" || fail "untracked file was discarded"
+  grep -q 'stray note' "$w/main/notes-2026-08-28.md" || fail "untracked file was discarded"
+  pass "T12 untracked-only dirt does not hold the primary behind its mates"
+}
+
+# --- T13: a tracked-dirty primary is skipped AND reported as behind the fleet -
+# Tracked modifications can conflict with a fast-forward, so that skip stands;
+# what must not stand is its silence, because a skipped primary is an inversion
+# (the fleet lead is older than the homes it leads), not a deferral.
+test_tracked_dirty_primary_is_reported_behind_fleet() {
+  local w out before
+  w=$(new_world t13)
+  add_sm "$w" sm1
+  bump_origin "$w" instr
+  printf 'uncommitted local edit\n' >> "$w/main/README.md"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "a tracked-dirty primary is still skipped"
+  assert_contains "$out" "secondmate sm1: updated " "the mate advanced past the primary"
+  assert_contains "$out" "firstmate-behind-fleet: yes: dirty working tree" \
+    "a skipped primary whose mates advanced must be reported, not left as one quiet line"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] || fail "skipped primary HEAD moved"
+  grep -q 'uncommitted local edit' "$w/main/README.md" || fail "tracked local edit was discarded"
+  pass "T13 a tracked-dirty primary is skipped and reported as behind its fleet"
+}
+
+# --- T14: an untracked file in the fast-forward's way is never overwritten ----
+# Untracked tolerance delegates the collision case to git itself: it refuses the
+# fast-forward rather than clobbering, and that refusal is reported as a skip.
+test_untracked_collision_is_skipped_not_clobbered() {
+  local w out before
+  w=$(new_world t14)
+  add_sm "$w" sm1
+  git -C "$w/seed" pull -q origin main >/dev/null 2>&1 || true
+  printf 'from origin\n' > "$w/seed/arriving.md"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm add-arriving
+  git -C "$w/seed" push -q origin main
+  printf 'local untracked content\n' > "$w/main/arriving.md"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: fast-forward failed" \
+    "a colliding untracked file must refuse the fast-forward"
+  assert_contains "$out" "firstmate-behind-fleet: yes: fast-forward failed" \
+    "that refusal still leaves the primary behind its fleet and must be reported"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] || fail "primary HEAD moved despite the refusal"
+  grep -q 'local untracked content' "$w/main/arriving.md" || fail "untracked file was overwritten"
+  pass "T14 an untracked file in the fast-forward's way is reported, never overwritten"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
@@ -485,5 +559,8 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_untracked_only_primary_still_updates
+test_tracked_dirty_primary_is_reported_behind_fleet
+test_untracked_collision_is_skipped_not_clobbered
 
 echo "# all fm-update tests passed"

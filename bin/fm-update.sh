@@ -25,6 +25,8 @@
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
+#   - firstmate-behind-fleet: no | yes: <reason>  (was the PRIMARY skipped while a
+#     mate it leads ended up on the new commit)
 #   - restart-secondmates: fm-<id>...|none (every live secondmate this pass left
 #     on origin's tip - advanced OR already there - whose recorded runtime can
 #     prove a restart)
@@ -42,9 +44,9 @@
 #
 # Only two things keep a live mate out of the restart set, and neither is papered
 # over as a reload:
-#   - its home was SKIPPED (dirty, diverged, offline, unsafe). It is not on the
-#     new bytes, nothing here forces, stashes, or discards it, and it gets no
-#     action at all.
+#   - its home was SKIPPED (tracked-dirty, diverged, offline, unsafe). It is not
+#     on the new bytes, nothing here forces, stashes, or discards it, and it gets
+#     no action at all.
 #   - its runtime cannot prove the old agent stopped and a replacement came up
 #     (bin/fm-secondmate-restart-lib.sh owns that test), so it falls to the
 #     honest re-read steer and is reported as a nudge, never as a reload.
@@ -77,7 +79,9 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
-ff_target "$FM_ROOT" "firstmate" origin no no
+ff_target "$FM_ROOT" "firstmate" origin no
+primary_status="$FF_STATUS"
+primary_skip_reason="$FF_SKIP_REASON"
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi
@@ -93,6 +97,7 @@ fi
 # sweep's threshold, not this command's, so only the two sets below are read.
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
+FF_SETTLED_COUNT=0
 FF_RESTART_WINDOWS=""
 FF_STEER_WINDOWS=""
 
@@ -181,6 +186,7 @@ if [ -f "$SECONDMATES_MD" ]; then
             else
               echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
             fi
+            FF_SETTLED_COUNT=$((FF_SETTLED_COUNT + 1))
             if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
               claim_settled_secondmate "$id"
             fi
@@ -189,6 +195,7 @@ if [ -f "$SECONDMATES_MD" ]; then
             echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })"
             # Already on the target commit is a SUCCESSFUL update of that home,
             # so it earns the same restart as one that had to advance.
+            FF_SETTLED_COUNT=$((FF_SETTLED_COUNT + 1))
             if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
               claim_settled_secondmate "$id"
             fi
@@ -206,10 +213,21 @@ fi
 
 # --- caller action summary -------------------------------------------------
 
+# A skipped PRIMARY is not the deferral a skipped mate is: it leaves the fleet
+# lead running older instructions than the homes it supervises, and its one
+# "skipped" line reads exactly like theirs. Report that inversion as its own
+# outcome - with the reason, so the caller can say what has to clear - rather
+# than leaving it to be spotted among the per-target lines.
+firstmate_behind="no"
+if [ "$primary_status" = "skipped" ] && [ "$FF_SETTLED_COUNT" -gt 0 ]; then
+  firstmate_behind="yes: $primary_skip_reason"
+fi
+
 # claim_settled_secondmate puts each live settled mate in exactly one set, so the
-# two lines below are disjoint by construction: no mate is ever restarted and
-# then also steered about the instructions it just relaunched on.
+# last two lines below are disjoint by construction: no mate is ever restarted
+# and then also steered about the instructions it just relaunched on.
 
 echo "reread-firstmate: $reread_firstmate"
+echo "firstmate-behind-fleet: $firstmate_behind"
 echo "restart-secondmates:${FF_RESTART_WINDOWS:- none}"
 echo "nudge-secondmates:${FF_STEER_WINDOWS:- none}"

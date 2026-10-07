@@ -24,9 +24,9 @@
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
-# The seeded .fm-secondmate-home identity marker is gitignored too; the local
-# sync tolerates only that marker during the one-time upgrade of pre-ignore
-# linked-worktree homes.
+# The seeded .fm-secondmate-home identity marker is gitignored too, and a home
+# seeded before that ignore landed carries it as an untracked file, which the
+# fast-forward guard tolerates like any other untracked file.
 # Locally leased homes start at a detached HEAD on the default branch, so their
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
@@ -246,13 +246,27 @@ remote_sync_failure_reason() { # <exit-status> <output>
   first_line "$2"
 }
 
+# Any dirt worth MENTIONING in a secondmate home, excluding the seeded identity
+# marker. Advisory only: bin/fm-config-push.sh reports it and carries on. The
+# fast-forward guard reads tracked_dirty_status below instead, because what is
+# worth mentioning and what can block a fast-forward are different questions.
 dirty_status() {
-  local dir=$1 ignore_seed_marker=${2:-no}
-  if [ "$ignore_seed_marker" = yes ]; then
-    git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
-  else
-    git -C "$dir" status --porcelain 2>/dev/null | head -1
-  fi
+  local dir=$1
+  git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
+}
+
+# The dirt that can actually block a fast-forward: tracked modifications, staged
+# changes, renames, and unmerged paths. An UNTRACKED file is excluded on purpose.
+# A fast-forward writes only tracked paths, and where an incoming commit would
+# land on top of an untracked file git refuses the fast-forward itself rather
+# than clobbering it, which ff_target already reports as a skip - so git owns
+# that collision and this guard does not have to pre-empt it. Counting untracked
+# files as blocking dirt instead converted a benign condition (a stray note in a
+# checkout root, which every long-lived home accumulates) into an indefinite,
+# quiet hold at an old commit.
+tracked_dirty_status() {
+  local dir=$1
+  git -C "$dir" status --porcelain 2>/dev/null | grep -v '^?? ' | head -1
 }
 
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
@@ -277,8 +291,9 @@ live_secondmate_meta_records() {
 
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
-#   FF_STATUS = updated|current|skipped
-#   FF_INSTR  = comma list of changed instruction paths (only when updated)
+#   FF_STATUS      = updated|current|skipped
+#   FF_INSTR       = comma list of changed instruction paths (only when updated)
+#   FF_SKIP_REASON = the skip's reason, verbatim as printed (only when skipped)
 #
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
@@ -289,37 +304,51 @@ live_secondmate_meta_records() {
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
 # Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# tracked-dirty, diverged, or wrong-branch target and leave its work untouched.
+# Untracked files are not blocking dirt - tracked_dirty_status owns why.
 FF_STATUS=""
 FF_INSTR=""
+FF_SKIP_REASON=""
+
+# One skip outcome: publish the reason in FF_SKIP_REASON and print the target's
+# status line. Every skip arm below goes through here, so a caller that must act
+# on the reason reads it from the global instead of re-parsing the line -
+# bin/fm-update.sh reports a skipped PRIMARY, which is an inversion rather than a
+# deferral, because it leaves the fleet lead older than the homes it leads.
+ff_skip() { # <label> <reason>
+  FF_SKIP_REASON="$2"
+  echo "$1: skipped: $2"
+}
+
 ff_target() {
-  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
+  FF_SKIP_REASON=""
 
   if [ ! -d "$dir" ]; then
-    echo "$label: skipped: not a directory"
+    ff_skip "$label" "not a directory"
     return 0
   fi
   if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "$label: skipped: not a git repo"
+    ff_skip "$label" "not a git repo"
     return 0
   fi
 
   local default base cur instr local_rev base_rev before after out
   default=$(default_branch "$dir") || {
-    echo "$label: skipped: cannot determine default branch"
+    ff_skip "$label" "cannot determine default branch"
     return 0
   }
 
   # Resolve the fast-forward base from base_mode (see header).
   if [ "$base_mode" = origin ]; then
     if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-      echo "$label: skipped: no origin remote"
+      ff_skip "$label" "no origin remote"
       return 0
     fi
     if ! fetch_once "$dir"; then
-      echo "$label: skipped: fetch failed"
+      ff_skip "$label" "fetch failed"
       return 0
     fi
     base="origin/$default"
@@ -328,31 +357,31 @@ ff_target() {
   fi
 
   if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
-    echo "$label: skipped: $base does not exist"
+    ff_skip "$label" "$base does not exist"
     return 0
   fi
 
   cur=$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo "")
   if [ -z "$cur" ] && [ "$allow_detached" != yes ]; then
-    echo "$label: skipped: detached HEAD, expected $default"
+    ff_skip "$label" "detached HEAD, expected $default"
     return 0
   fi
   if [ -n "$cur" ] && [ "$cur" != "$default" ]; then
-    echo "$label: skipped: on $cur, expected $default"
+    ff_skip "$label" "on $cur, expected $default"
     return 0
   fi
 
-  if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
-    echo "$label: skipped: dirty working tree"
+  if [ -n "$(tracked_dirty_status "$dir")" ]; then
+    ff_skip "$label" "dirty working tree"
     return 0
   fi
 
   local_rev=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || {
-    echo "$label: skipped: cannot read HEAD"
+    ff_skip "$label" "cannot read HEAD"
     return 0
   }
   base_rev=$(git -C "$dir" rev-parse "$base" 2>/dev/null) || {
-    echo "$label: skipped: cannot read $base"
+    ff_skip "$label" "cannot read $base"
     return 0
   }
   if [ "$local_rev" = "$base_rev" ]; then
@@ -361,14 +390,14 @@ ff_target() {
     return 0
   fi
   if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
-    echo "$label: skipped: diverged from $base"
+    ff_skip "$label" "diverged from $base"
     return 0
   fi
 
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
-    echo "$label: skipped: fast-forward failed: $(first_line "$out")"
+    ff_skip "$label" "fast-forward failed: $(first_line "$out")"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)
@@ -382,10 +411,14 @@ ff_target() {
   return 0
 }
 
-# Sweep accumulators. The caller resets both before a sweep and reads
-# FF_NUDGE_WINDOWS after.
+# Sweep accumulators. The caller resets all three before a sweep and reads
+# FF_NUDGE_WINDOWS and FF_SETTLED_COUNT after.
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
+# How many homes this sweep left AT the base - advanced or already there. A
+# caller that also fast-forwards the PRIMARY reads it to tell an inversion (the
+# primary skipped while the homes it leads moved on) from a lone skip.
+FF_SETTLED_COUNT=0
 
 # Validate and fast-forward one secondmate home, accumulating its stable
 # fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
@@ -428,7 +461,10 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes
+  if [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; then
+    FF_SETTLED_COUNT=$((FF_SETTLED_COUNT + 1))
+  fi
   if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
     && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
     fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"
