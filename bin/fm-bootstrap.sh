@@ -10,6 +10,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "STARTUP_MEMORY_BUDGET: startup memory over budget - <total> estimated tokens against an allowance of <budget>; curate it with /stow",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -17,6 +18,8 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "ENDPOINT_DRIFT: <id>: <where the endpoint's shell actually is> <remediation>",
+#                 "ENDPOINT_DRIFT: <n> endpoint(s) on <backends> could not be checked ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -159,6 +162,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# The physically resolved primary checkout, for comparison against a backend's
+# own physically resolved directory read (detect_endpoint_drift).
+FM_ROOT_REAL="$(cd "$FM_ROOT" 2>/dev/null && pwd -P)" || FM_ROOT_REAL="$FM_ROOT"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -1340,6 +1346,25 @@ startup_memory_budget_setup() {
   fi
 }
 
+# Detect-only meter reading against the same estimate the /stow curation pass
+# uses, so a home that has drifted past its allowance says so on its own
+# instead of waiting for someone to remember to run that pass. It reports and
+# nothing more: curation is judgement work owned by /stow, and a startup check
+# that blocked or pruned would be the wrong instrument.
+# An unreadable allowance stays silent here because startup_memory_budget_setup
+# already owns that diagnostic, and a home whose memory files are absent simply
+# measures zero.
+startup_memory_budget_meter() {
+  local total=0 file
+  fm_startup_memory_budget_read "$CONFIG" >/dev/null 2>&1 || return 0
+  for file in captain.md captain-shared.md learnings.md; do
+    fm_startup_memory_measure_file "$DATA/$file" >/dev/null 2>&1 || return 0
+    total=$((total + FM_STARTUP_MEMORY_MEASURE_TOKENS))
+  done
+  fm_startup_memory_decimal_le "$total" "$FM_STARTUP_MEMORY_BUDGET_VALUE" && return 0
+  echo "STARTUP_MEMORY_BUDGET: startup memory over budget - $total estimated tokens against an allowance of $FM_STARTUP_MEMORY_BUDGET_VALUE; curate it with /stow"
+}
+
 if [ "${1:-}" = "lavish-compatible" ]; then
   tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
   exit
@@ -1479,12 +1504,107 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  startup_memory_budget_meter
+  detect_endpoint_drift
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+}
+
+# Endpoint-directory drift check. Every task endpoint's shell is supposed to sit
+# in the isolated copy its own record names, and an ordinary host restart breaks
+# that: the endpoints come back with their shells in a default directory instead.
+# Measured on 2026-08-24, five of seven stood-down endpoints had drifted, and
+# four of those five had drifted into the primary checkout - the one copy project
+# work must never happen in. Nothing reported it. The worktree-tangle check above
+# reads the primary checkout's BRANCH, not any endpoint's directory, so it stayed
+# silent, and the drift surfaced only when a relaunch was refused by accident.
+#
+# Detect-only, and passive in the strict sense: it reads endpoint directories
+# through fm_backend_endpoint_paths_passive, which starts no server and types
+# nothing into a running agent. Returning a drifted endpoint is a separate,
+# guarded operation owned by bin/fm-control.sh relaunch; this check never moves a
+# shell, and it is safe in a read-only session for the same reason.
+#
+# One roster read answers for every task in that session, which is what keeps
+# this off the session-start critical path: a per-endpoint read costs ~0.35s
+# through the Herdr CLI wrapper, so a home with eight tasks would pay ~3.5s,
+# against ~0.07s for the whole session at once. The roster is cached for as long
+# as consecutive tasks keep naming the same backend and session, which a
+# single-home fleet does throughout; interleaved sessions only re-read, they
+# never read wrongly.
+#
+# Silent on a healthy endpoint, on a task with no recorded copy, and on an
+# endpoint its session's roster does not answer for - a stood-down or gone
+# endpoint is the session digest's own liveness read to report, not this check's.
+# A backend with no passive live-cwd read at all - zellij, cmux, and Orca, whose
+# only reads would inject a `pwd` into the surface - is an UNKNOWN rather than a
+# pass, so those endpoints are counted and named as unchecked rather than
+# silently treated as healthy.
+detect_endpoint_drift() {
+  local meta id backend target worktree locator session key roster row seen
+  local seen_real worktree_real status cached_backend='' cached_session='' cached_roster=''
+  local unchecked=0 unchecked_backends=''
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    worktree=$(fm_meta_get "$meta" worktree)
+    [ -n "$worktree" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    status=0
+    locator=$(fm_backend_endpoint_locator "$backend" "$target") || status=$?
+    if [ "$status" -eq 2 ]; then
+      unchecked=$((unchecked + 1))
+      case " $unchecked_backends " in
+        *" $backend "*) ;;
+        *) unchecked_backends="${unchecked_backends:+$unchecked_backends }$backend" ;;
+      esac
+      continue
+    fi
+    [ "$status" -eq 0 ] || continue
+    session=${locator%%$'\t'*}
+    key=${locator#*$'\t'}
+    if [ "$backend" != "$cached_backend" ] || [ "$session" != "$cached_session" ]; then
+      cached_backend=$backend
+      cached_session=$session
+      cached_roster=$(fm_backend_endpoint_paths_passive "$backend" "$session" 2>/dev/null) || cached_roster=''
+    fi
+    roster=$cached_roster
+    seen=''
+    while IFS= read -r row; do
+      [ "${row%%|*}" = "$key" ] || continue
+      seen=${row#*|}
+      break
+    done <<EOF
+$roster
+EOF
+    [ -n "$seen" ] || continue
+    # The healthy case is an exact string match, so take it before forking
+    # anything: on a fleet with nothing wrong this check then costs one roster
+    # read per session and no path resolution at all.
+    [ "$seen" != "$worktree" ] || continue
+    # Either side can carry a symlinked component - a recorded path came from a
+    # logical `pwd`, while a backend reports the physically resolved one - so
+    # canonicalize both before believing a mismatch or the check misfires in
+    # both directions (bin/fm-spawn.sh's PROJ_ABS_REAL carries the same
+    # reasoning).
+    seen_real=$(cd "$seen" 2>/dev/null && pwd -P) || seen_real=$seen
+    worktree_real=$(cd "$worktree" 2>/dev/null && pwd -P) || worktree_real=$worktree
+    [ "$seen_real" != "$worktree_real" ] || continue
+    if [ "$seen_real" = "$FM_ROOT_REAL" ]; then
+      echo "ENDPOINT_DRIFT: $id: endpoint is sitting in the primary checkout '$seen_real', which project work must never run in; its work is safe in '$worktree' - return the endpoint to that copy (bin/fm-control.sh relaunch $id returns a herdr endpoint itself) and start nothing from where it is now"
+    else
+      echo "ENDPOINT_DRIFT: $id: endpoint is in '$seen_real', not its recorded copy '$worktree'; its work is safe on disk but a relaunch refuses until the endpoint returns there (bin/fm-control.sh relaunch $id returns a herdr endpoint itself)"
+    fi
+  done
+  if [ "$unchecked" -gt 0 ]; then
+    echo "ENDPOINT_DRIFT: $unchecked endpoint(s) on $unchecked_backends could not be checked for directory drift, because reading a live directory there would type into the endpoint; confirm those endpoints by hand before relaunching one"
+  fi
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,
