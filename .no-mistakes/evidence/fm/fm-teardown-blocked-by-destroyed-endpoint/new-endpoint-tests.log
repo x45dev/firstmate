@@ -1,0 +1,5 @@
+ok - a landed task whose endpoint record was destroyed is cleaned up, naming its evidence
+ok - an endpointless task with one uncommitted file still refuses, and --force cannot supply the evidence
+ok - an endpointless task whose work never landed still refuses
+ok - cleanup without an endpoint never accepts the task record's own pull request as landed-work proof
+ok - an empty endpoint field refuses even on landed work, since a corrupt record is not a destroyed one
