@@ -29,7 +29,8 @@ The only live mates that do not restart are the ones whose home the update pass 
 
 The update is **fast-forward only** - the same sanctioned self-write as the fleet sync firstmate already runs.
 For a remote route, it updates the configured Firstmate code root on that host from its own origin, then guardedly fast-forwards the persistent home to that code-root commit.
-It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; anything dirty, diverged, offline, or on the wrong branch is skipped and reported.
+It never forces, never creates a merge commit, never stashes, and advances a target only on a clean fast-forward; a copy carrying uncommitted changes to tracked files, or one that is diverged, offline, or on the wrong branch, is skipped and reported.
+Untracked files are not a reason to refuse: a fast-forward writes only tracked paths, and git refuses the advance itself rather than overwriting an untracked file in its way, which is reported as a skip like any other.
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
@@ -40,8 +41,9 @@ This touches only the firstmate repo and its own worktrees, never anything under
    bin/fm-update.sh
    ```
    It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by three action lines that tell you exactly what to do next:
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by four action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
+   - `firstmate-behind-fleet: no` or `yes: <reason>`
    - `restart-secondmates: fm-<id>...|none`
    - `nudge-secondmates: fm-<id>...|none`
 
@@ -87,12 +89,14 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Say plainly when a mate got the message rather than a clean reload, and why - never let a partial reload read as a full one.
-   Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+   Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits, which were left untouched on purpose.
+   When `firstmate-behind-fleet:` says `yes`, say so first and name the reason it gives: this firstmate is now running older instructions than the second mates it supervises, which stays true at every later session until that reason is cleared, so it is the captain's decision rather than a line in a list.
+   The reason is what has to clear, and nothing here clears it: local edits need landing or removing by the captain, and a diverged copy needs their call.
 
 ## Safety
 
 - **Fast-forward only.**
-  A target that has diverged, is dirty, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
+  A target that has diverged, carries uncommitted changes to tracked files, is offline, or is on a non-default branch is skipped and reported, never forced or stashed.
   Nothing with unlanded work is ever discarded - this is prime directive #3.
 - **Only the firstmate repo and its worktrees** are touched, never `projects/`.
   It is the same sanctioned self-write as the fleet sync.

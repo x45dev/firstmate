@@ -433,7 +433,8 @@ It restarts every live second mate whose home the pass left on the target commit
 `origin` is whatever remote that home points at, not a fixed repository, so a fleet that carries its own changes points each home's `origin` at the fork it pushes to and updates from the code its own runs validated, rather than from a repository it is waiting on.
 That is the same split [`CONTRIBUTING.md`](../CONTRIBUTING.md) draws for a contributor: the fork answers whether the change is sound, and the upstream pull request answers only whether it gets taken.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+The update is fast-forward only: a target carrying uncommitted changes to tracked files, or one that has diverged, is offline, or is off its default branch, is reported and left untouched.
+A skipped primary is reported as its own outcome rather than one line among the mates', because it leaves the fleet lead running older instructions than the homes it supervises.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
