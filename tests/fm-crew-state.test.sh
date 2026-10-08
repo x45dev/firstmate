@@ -265,18 +265,23 @@ arm_idle_record() {  # <state-dir> <id>
 # The requested verdict is asserted, so a fixture that stops producing it fails
 # instead of going quietly vacuous.
 write_progress_sample() {  # <state-dir> <id> <still|advanced>
-  local state=$1 id=$2 want=$3 got
+  local state=$1 id=$2 want=$3 got second
+  # Decided outside the command substitution: stock Bash 3.2 cannot parse a
+  # case statement nested inside $( ).
+  if [ "$want" = still ]; then
+    second=$(printf 'esc to interrupt\n123 tokens\n')
+  elif [ "$want" = advanced ]; then
+    second=$(printf 'esc to interrupt\n456 tokens\n')
+  else
+    fail "unsupported movement fixture verdict '$want'"
+  fi
   got=$(
     FM_PROGRESS_MIN_GAP_SECS=0
     export FM_PROGRESS_MIN_GAP_SECS
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-progress-lib.sh"
     fm_progress_observe "$state" "$id" "$(printf 'esc to interrupt\n123 tokens\n')" >/dev/null
-    case "$want" in
-      still)    fm_progress_observe "$state" "$id" "$(printf 'esc to interrupt\n123 tokens\n')" ;;
-      advanced) fm_progress_observe "$state" "$id" "$(printf 'esc to interrupt\n456 tokens\n')" ;;
-      *)        printf 'unsupported' ;;
-    esac
+    fm_progress_observe "$state" "$id" "$second"
   )
   [ "$got" = "$want" ] || fail "movement fixture produced '$got', wanted '$want'"
 }
