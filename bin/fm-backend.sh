@@ -875,6 +875,82 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+# Passive endpoint-directory reads, for a caller that needs to know where a
+# task endpoint's shell is actually sitting WITHOUT touching that endpoint - the
+# session-start endpoint-drift diagnostic. This is deliberately a different
+# operation from fm-spawn.sh's spawn_current_path, which may both start a server
+# and type into the pane because it is about to use that pane anyway.
+#
+# Three constraints shape it:
+#   - No server start. Like fm_backend_target_exists, the Herdr arm queries the
+#     recorded session directly instead of going through
+#     fm_backend_herdr_target_ready, whose fm_backend_herdr_server_ensure would
+#     start a stopped Herdr server as a side effect of a read.
+#   - No input. zellij's and cmux's only live-cwd reads are ACTIVE probes that
+#     submit a `pwd` into the surface (see each adapter's own note), which a
+#     passive diagnostic must never do to a running agent. Those backends, and
+#     Orca, therefore report no passive read at all rather than a wrong or an
+#     injected answer.
+#   - One read per session, not per task. A per-endpoint read costs ~0.35s
+#     through the Herdr CLI wrapper, so eight tasks would add ~3.5s to every
+#     session start; one roster read for the whole session costs ~0.07s and
+#     answers for every task in it (measured 2026-10-07, Herdr protocol 21).
+#
+# fm_backend_endpoint_locator splits a recorded target into the session to read
+# and the key to look up in that session's roster, and
+# fm_backend_endpoint_paths_passive reads one session's roster. Both return 2
+# when the backend exposes no passive read; a caller must distinguish 2 from 1,
+# because an unsupported backend is an UNKNOWN, not a confirmation that the
+# shell is where it should be.
+fm_backend_endpoint_locator() {  # <backend> <target> -> "<session><TAB><key>"
+  local backend=$1 target=$2 session key
+  [ -n "$target" ] || return 1
+  case "$backend" in
+    tmux|herdr) ;;
+    *) return 2 ;;
+  esac
+  session=${target%%:*}
+  key=${target#*:}
+  [ -n "$session" ] && [ "$key" != "$target" ] && [ -n "$key" ] || return 1
+  # A tmux target may carry a `.pane` suffix; the window is what the roster
+  # keys on. A Herdr pane id is itself colon-bearing (`w2:pFH`) and is used
+  # whole.
+  [ "$backend" != tmux ] || key=${key%%.*}
+  [ -n "$key" ] || return 1
+  printf '%s\t%s' "$session" "$key"
+}
+
+fm_backend_endpoint_paths_passive() {  # <backend> <session> -> "<key>|<path>" lines
+  local backend=$1 session=$2
+  [ -n "$session" ] || return 1
+  case "$backend" in
+    tmux)
+      # Exact-match keys, never a tmux-resolved target. Verified against tmux
+      # 3.4: `display-message -t <session>:<name>` for a window name that no
+      # longer exists resolves to the session's CURRENT window and exits 0, so a
+      # target-addressed read would answer a gone endpoint with another task's
+      # directory - a drift report naming the wrong task. Both the window id and
+      # the window name are emitted so either recorded form matches.
+      tmux list-windows -t "$session" \
+        -F '#{window_id}|#{pane_current_path}
+#{window_name}|#{pane_current_path}' 2>/dev/null || return 1
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      # `foreground_cwd`, never `cwd`: the latter is frozen at pane-creation
+      # time and still names the project directory for a task whose shell has
+      # long since entered its worktree, which would read as drift on every
+      # healthy task (bin/backends/herdr.sh owns that distinction).
+      fm_backend_herdr_cli "$session" pane list 2>/dev/null \
+        | jq -r '.result.panes[]? | select(.pane_id and .foreground_cwd) | "\(.pane_id)|\(.foreground_cwd)"' 2>/dev/null \
+        || return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:

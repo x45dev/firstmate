@@ -30,6 +30,45 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Passive endpoint-directory reads
+
+The session-start endpoint-drift diagnostic reads each task endpoint's live working directory without touching the endpoint, so what tmux reports for a target that no longer exists decides whether a drift report can name the wrong task.
+Verified on 2026-10-07 with tmux 3.4 on Linux.
+
+```sh
+tmux -L fmtest new-session -d -s fm -n fm-wandered -c /tmp
+tmux -L fmtest new-window -d -t fm: -n fm-nameless -c /etc
+tmux -L fmtest list-windows -t fm -F '#{window_index} #{window_name} #{pane_current_path}'
+tmux -L fmtest display-message -p -t fm:fm-gone '#{window_name} #{pane_current_path}'
+echo "exit=$?"
+```
+
+Observed output:
+
+```text
+0 fm-wandered /tmp
+1 fm-nameless /etc
+fm-wandered /tmp
+exit=0
+```
+
+A `session:window` target naming a window that does not exist resolves to the session's CURRENT window and exits 0 rather than failing, so a target-addressed read answers a gone endpoint with another task's directory.
+`fm_backend_endpoint_paths_passive` therefore reads the whole window roster and the caller selects the exact recorded window id or name, which makes an absent window an unanswered read.
+That behavior is pinned by `tests/fm-bootstrap.test.sh`'s endpoint-drift cases, where a task whose recorded window is gone must stay silent while a genuinely drifted sibling in the same session is reported.
+The same record applies to the Herdr arm's use of `foreground_cwd` rather than `cwd`: a live task read on 2026-10-07 returned a `cwd` still naming the pane's creation-time project directory while `foreground_cwd` named the task's own isolated copy, so reading `cwd` would report drift on every healthy task.
+Zellij, cmux, and Orca expose no passive live-directory read at all - their only reads submit a `pwd` into the surface - so the diagnostic counts those endpoints as unchecked instead of treating silence as health.
+
+Read cost was measured the same day on an eight-task home against Herdr protocol 21, which is why the read is per session rather than per endpoint.
+
+```text
+per-endpoint reads through fm_backend_herdr_cli: 0.325-0.394s each, 3.526s total
+one pane-list roster read for the whole session: 0.201-0.279s
+the whole detect_endpoint_drift pass over 8 tasks: 0.647s
+the session digest's existing per-endpoint liveness reads over the same 8 tasks: 0.940s
+```
+
+The diagnostic therefore costs less than the per-endpoint liveness read the session digest already performs beside it, and an unchanged fleet pays one roster read per session with no path resolution at all, because an exact string match settles the healthy case before any canonicalization.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

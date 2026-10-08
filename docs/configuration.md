@@ -247,6 +247,7 @@ Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective v
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
+Session start reads the same accounting as a detect-only bootstrap diagnostic and prints one line when a home is over its allowance, so the drift is visible without running a curation pass to discover it; that line reports only and never curates, prunes, or blocks.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
 ## Stow pass horizon (config/stow-pass-horizon)
@@ -477,6 +478,7 @@ An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with i
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+Bootstrap also reports an `ENDPOINT_DRIFT:` line per task whose endpoint shell is no longer in the copy its record names, naming the primary checkout when that is where it landed, and one line counting endpoints on backends with no passive directory read; it is detect-only, and [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns the response.
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.

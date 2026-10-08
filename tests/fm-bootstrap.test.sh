@@ -885,6 +885,289 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
+# The startup-memory allowance had a meter that only the /stow curation pass ever
+# read, so a home could drift far past its budget and inject that cost at every
+# session start with no signal anywhere. Bootstrap now reads the same meter as a
+# detect-only diagnostic. The properties pinned here are that it stays silent for
+# an absent or within-budget home, that it reports the measured total and the
+# allowance when over, and that it works in a secondmate home off the inherited
+# value the primary never materializes locally.
+run_memory_meter_case() {
+  local home=$1 fakebin=$2
+  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+}
+
+# Writes a file of exactly <bytes> bytes, which the estimator costs at
+# ceil(bytes / 3) tokens.
+write_memory_file() {
+  local path=$1 bytes=$2
+  mkdir -p "$(dirname "$path")"
+  head -c "$bytes" < /dev/zero | tr '\0' 'x' > "$path"
+}
+
+make_memory_meter_home() {
+  local case_dir=$1 budget=$2
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' "$budget" > "$case_dir/home/config/startup-memory-budget"
+  make_fake_toolchain "$case_dir"
+}
+
+test_startup_memory_budget_meter_is_silent_within_budget() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/memory-meter-silent"
+  fakebin=$(make_memory_meter_home "$case_dir" 100)
+
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "absent memory files must not report over budget, got: $out"
+
+  # 150 bytes across the three files is 50 estimated tokens against 100.
+  write_memory_file "$case_dir/home/data/captain.md" 60
+  write_memory_file "$case_dir/home/data/captain-shared.md" 60
+  write_memory_file "$case_dir/home/data/learnings.md" 30
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "a within-budget home must stay silent, got: $out"
+
+  pass "bootstrap startup-memory meter is silent when files are absent or within budget"
+}
+
+test_startup_memory_budget_meter_reports_over_budget() {
+  local case_dir fakebin out expected
+  case_dir="$TMP_ROOT/memory-meter-over"
+  fakebin=$(make_memory_meter_home "$case_dir" 100)
+
+  # 303 bytes is 101 estimated tokens: one token past the allowance, so the
+  # comparison boundary itself is pinned rather than a comfortable excess.
+  write_memory_file "$case_dir/home/data/captain.md" 300
+  write_memory_file "$case_dir/home/data/learnings.md" 3
+  expected='STARTUP_MEMORY_BUDGET: startup memory over budget - 101 estimated tokens against an allowance of 100; curate it with /stow'
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ "$out" = "$expected" ] || fail "expected '$expected', got: $out"
+
+  # One token less is within budget and silent, so the line tracks the measured
+  # total rather than the mere presence of memory files. Each file is costed at
+  # its own ceiling, so dropping the one-token file is what removes that token.
+  rm -f "$case_dir/home/data/learnings.md"
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "exactly at the allowance must stay silent, got: $out"
+
+  pass "bootstrap startup-memory meter reports the measured total and allowance when over budget"
+}
+
+test_startup_memory_budget_meter_reads_inherited_secondmate_allowance() {
+  local case_dir fakebin out expected
+  case_dir="$TMP_ROOT/memory-meter-secondmate"
+  fakebin=$(make_memory_meter_home "$case_dir" 20)
+  # A secondmate home never materializes its own allowance; it converges the
+  # primary-authoritative value, and the meter must read that inherited file.
+  : > "$case_dir/home/.fm-secondmate-home"
+  write_memory_file "$case_dir/home/data/captain-shared.md" 90
+
+  expected='STARTUP_MEMORY_BUDGET: startup memory over budget - 30 estimated tokens against an allowance of 20; curate it with /stow'
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ "$out" = "$expected" ] || fail "expected '$expected', got: $out"
+
+  rm -f "$case_dir/home/config/startup-memory-budget"
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "an unreadable allowance is owned by its own diagnostic, got: $out"
+
+  pass "bootstrap startup-memory meter judges a secondmate home by its inherited allowance"
+}
+
+# Endpoint-directory drift. A host restart brings task endpoints back with their
+# shells in a default directory instead of the isolated copy their record names,
+# and on 2026-08-24 four of five drifted endpoints had landed in the primary
+# checkout itself. Nothing reported it: the worktree-tangle check reads the
+# primary's BRANCH, not any endpoint's directory. These cases run against a REAL
+# tmux server on a private socket, because a stub tmux could only confirm the
+# answer written into the stub - the question is what tmux itself reports for a
+# pane whose shell has moved.
+DRIFT_TMUX_SOCKET=
+DRIFT_REAL_TMUX=
+
+drift_tmux_cleanup() {
+  [ -n "$DRIFT_TMUX_SOCKET" ] || return 0
+  "$DRIFT_REAL_TMUX" -L "$DRIFT_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
+  DRIFT_TMUX_SOCKET=
+}
+
+# A fake toolchain whose `tmux` is a shim onto a private socket, so the adapter's
+# bare `tmux ...` calls reach a real server that can never touch the host's own
+# sessions.
+make_drift_home() {  # <case-dir> -> <fakebin>
+  local case_dir=$1 fakebin
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+exec "$DRIFT_REAL_TMUX" -L "$DRIFT_TMUX_SOCKET" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+run_drift_case() {  # <home> <fakebin> [<root>]
+  local home=$1 fakebin=$2
+  local root=${3:-$home}
+  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null \
+    | grep '^ENDPOINT_DRIFT:' || true
+}
+
+write_task_record() {  # <state> <id> <target> <worktree> [<backend>]
+  local state=$1 id=$2 target=$3 worktree=$4 backend=${5:-}
+  {
+    printf 'window=%s\n' "$target"
+    printf 'endpoint_task_id=%s\n' "$id"
+    [ -z "$worktree" ] || printf 'worktree=%s\n' "$worktree"
+    printf 'harness=claude\nkind=ship\n'
+    [ -z "$backend" ] || printf 'backend=%s\n' "$backend"
+  } > "$state/$id.meta"
+}
+
+test_endpoint_drift_names_the_primary_checkout_case() {
+  local case_dir fakebin home state primary out
+  command -v tmux >/dev/null 2>&1 || { pass "endpoint-drift primary-checkout case skipped without tmux"; return; }
+  DRIFT_REAL_TMUX=$(command -v tmux)
+  DRIFT_TMUX_SOCKET="fm-bootstrap-drift-primary-$$"
+  case_dir="$TMP_ROOT/drift-primary"
+  fakebin=$(make_drift_home "$case_dir")
+  home="$case_dir/home"
+  state="$home/state"
+  primary="$case_dir/primary"
+  mkdir -p "$primary" "$case_dir/copy-parked" "$case_dir/copy-healthy"
+
+  # One endpoint parked in the primary checkout, one sitting where it belongs.
+  "$fakebin/tmux" new-session -d -s fm -n fm-parked -c "$primary" \
+    || fail "real tmux: could not create the drifted endpoint"
+  "$fakebin/tmux" new-window -d -t fm: -n fm-healthy -c "$case_dir/copy-healthy" \
+    || fail "real tmux: could not create the healthy endpoint"
+  write_task_record "$state" parked fm:fm-parked "$case_dir/copy-parked"
+  write_task_record "$state" healthy fm:fm-healthy "$case_dir/copy-healthy"
+
+  out=$(run_drift_case "$home" "$fakebin" "$primary")
+  drift_tmux_cleanup
+
+  case "$out" in
+    *"ENDPOINT_DRIFT: parked:"*) ;;
+    *) fail "an endpoint parked in the primary checkout must be reported, got: ${out:-(silent)}" ;;
+  esac
+  case "$out" in
+    *"primary checkout"*) ;;
+    *) fail "the primary-checkout case must say so, got: $out" ;;
+  esac
+  case "$out" in
+    *"$case_dir/copy-parked"*) ;;
+    *) fail "the line must name the copy holding the work, got: $out" ;;
+  esac
+  # The healthy endpoint is the control: without it a check that reported every
+  # task would pass this case just as well.
+  case "$out" in
+    *healthy*) fail "an endpoint sitting in its recorded copy must stay silent, got: $out" ;;
+  esac
+
+  pass "bootstrap reports an endpoint parked in the primary checkout and stays silent on a healthy one"
+}
+
+test_endpoint_drift_reports_an_ordinary_drifted_copy() {
+  local case_dir fakebin home state out
+  command -v tmux >/dev/null 2>&1 || { pass "endpoint-drift ordinary case skipped without tmux"; return; }
+  DRIFT_REAL_TMUX=$(command -v tmux)
+  DRIFT_TMUX_SOCKET="fm-bootstrap-drift-ordinary-$$"
+  case_dir="$TMP_ROOT/drift-ordinary"
+  fakebin=$(make_drift_home "$case_dir")
+  home="$case_dir/home"
+  state="$home/state"
+  mkdir -p "$case_dir/primary" "$case_dir/elsewhere" "$case_dir/copy-wandered" "$case_dir/copy-nameless"
+
+  "$fakebin/tmux" new-session -d -s fm -n fm-wandered -c "$case_dir/elsewhere" \
+    || fail "real tmux: could not create the drifted endpoint"
+  # A task with no recorded copy has nothing to be drifted from, and an endpoint
+  # that does not exist is the session digest's own liveness read to report.
+  "$fakebin/tmux" new-window -d -t fm: -n fm-nameless -c "$case_dir/elsewhere" \
+    || fail "real tmux: could not create the unrecorded-copy endpoint"
+  write_task_record "$state" wandered fm:fm-wandered "$case_dir/copy-wandered"
+  write_task_record "$state" nameless fm:fm-nameless ''
+  write_task_record "$state" gone fm:fm-gone "$case_dir/copy-nameless"
+
+  out=$(run_drift_case "$home" "$fakebin" "$case_dir/primary")
+  drift_tmux_cleanup
+
+  case "$out" in
+    *"ENDPOINT_DRIFT: wandered:"*"$case_dir/elsewhere"*) ;;
+    *) fail "a drifted endpoint must be reported with where it actually is, got: ${out:-(silent)}" ;;
+  esac
+  case "$out" in
+    *"primary checkout"*) fail "an ordinary drift must not claim the primary-checkout case, got: $out" ;;
+  esac
+  case "$out" in
+    *nameless*) fail "a task with no recorded copy must stay silent, got: $out" ;;
+  esac
+  case "$out" in
+    *gone*) fail "an unreadable endpoint must stay silent, got: $out" ;;
+  esac
+
+  pass "bootstrap reports an ordinary drifted endpoint without claiming the primary-checkout case"
+}
+
+test_endpoint_drift_tolerates_a_symlinked_recorded_copy() {
+  local case_dir fakebin home state out
+  command -v tmux >/dev/null 2>&1 || { pass "endpoint-drift symlink case skipped without tmux"; return; }
+  DRIFT_REAL_TMUX=$(command -v tmux)
+  DRIFT_TMUX_SOCKET="fm-bootstrap-drift-symlink-$$"
+  case_dir="$TMP_ROOT/drift-symlink"
+  fakebin=$(make_drift_home "$case_dir")
+  home="$case_dir/home"
+  state="$home/state"
+  mkdir -p "$case_dir/primary" "$case_dir/real-copy"
+  ln -s "$case_dir/real-copy" "$case_dir/linked-copy" \
+    || fail "could not create the symlinked copy path"
+
+  # A recorded path came from a logical `pwd` and can carry a symlinked
+  # component, while the backend reports the physically resolved one - macOS's
+  # /tmp -> /private/tmp is the everyday case. The two name the SAME directory,
+  # so a string comparison alone would report drift on a healthy endpoint.
+  "$fakebin/tmux" new-session -d -s fm -n fm-linked -c "$case_dir/real-copy" \
+    || fail "real tmux: could not create the endpoint"
+  write_task_record "$state" linked fm:fm-linked "$case_dir/linked-copy"
+
+  out=$(run_drift_case "$home" "$fakebin" "$case_dir/primary")
+  drift_tmux_cleanup
+
+  [ -z "$out" ] || fail "a recorded copy reached through a symlink must not read as drift, got: $out"
+
+  pass "bootstrap does not report drift when the recorded copy and the live directory are the same through a symlink"
+}
+
+test_endpoint_drift_counts_backends_it_cannot_read_passively() {
+  local case_dir fakebin home state out
+  command -v tmux >/dev/null 2>&1 || { pass "endpoint-drift unchecked case skipped without tmux"; return; }
+  DRIFT_REAL_TMUX=$(command -v tmux)
+  DRIFT_TMUX_SOCKET="fm-bootstrap-drift-unchecked-$$"
+  case_dir="$TMP_ROOT/drift-unchecked"
+  fakebin=$(make_drift_home "$case_dir")
+  home="$case_dir/home"
+  state="$home/state"
+  mkdir -p "$case_dir/primary" "$case_dir/copy-zellij"
+
+  # zellij's only live-directory read submits a `pwd` into the surface, which a
+  # passive diagnostic must never do to a running agent. That endpoint is an
+  # UNKNOWN, and saying nothing at all would record the unknown as a pass.
+  write_task_record "$state" unreadable-backend fm:fm-zellij "$case_dir/copy-zellij" zellij
+
+  out=$(run_drift_case "$home" "$fakebin" "$case_dir/primary")
+  drift_tmux_cleanup
+
+  case "$out" in
+    *"1 endpoint(s) on zellij could not be checked"*) ;;
+    *) fail "an endpoint on a backend with no passive read must be counted as unchecked, got: ${out:-(silent)}" ;;
+  esac
+
+  pass "bootstrap counts endpoints whose backend has no passive directory read instead of passing them"
+}
+
 # FM_BOOTSTRAP_NETWORK splits one bootstrap run into its local and network
 # halves so a session start can compose its digest from the local half alone and
 # run the network half concurrently. The property that has to hold is that the
@@ -1190,3 +1473,10 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_startup_memory_budget_meter_is_silent_within_budget
+test_startup_memory_budget_meter_reports_over_budget
+test_startup_memory_budget_meter_reads_inherited_secondmate_allowance
+test_endpoint_drift_names_the_primary_checkout_case
+test_endpoint_drift_reports_an_ordinary_drifted_copy
+test_endpoint_drift_tolerates_a_symlinked_recorded_copy
+test_endpoint_drift_counts_backends_it_cannot_read_passively
