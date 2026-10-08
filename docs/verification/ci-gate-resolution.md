@@ -252,7 +252,7 @@ $ echo $?
 
 ## The roster narrowed to what a pull request produces
 
-Run 2026-10-07.
+Run 2026-10-07; the narrowed roster transcripts re-recorded 2026-10-08.
 A gating workflow can expand a different job graph under a different event, so the jobs of its newest successful push run on the target branch are not the jobs a pull request of it produces.
 `x45dev/qrarca` is the live case: its `ci` workflow builds its matrix from `github.event_name`, three platforms on a push to main and two on a pull request.
 
@@ -286,18 +286,20 @@ governance (frontmatter, prose, links, config-layout)
 ```
 
 After it the push run's names are narrowed to the ones at least one of the workflow's newest five successful pull-request runs also produced, and what was set aside is named with the evidence for setting it aside.
-The transcript below was recorded when the narrowing read only the single newest pull-request run, so it names one run where the current output lists up to five (`narrowed to its pull-request runs <ids>`); it has not been re-run since the union, so treat the run ids as historical.
 The union is what stops a lighter newest run, such as a path-filtered or docs-only pull request, from dropping a suite an earlier pull request produced.
+Re-recorded live on 2026-10-08 against `x45dev/qrarca` pull request 27 (the verdict line is `failing` because that pull request's own `ubuntu-latest` build failed; only the roster lines matter here):
 
 ```
-required suites: 3, from x45dev/qrarca ci run 34421372166 narrowed to its pull-request run 30418714800 on main
-build & test (ubuntu-latest)
-build & test (windows-latest)
-cargo-deny (licenses, advisories, bans, sources)
-not required: build & test (macos-latest), governance (frontmatter, prose, links, config-layout) (not produced by ci run 30418714800, its newest pull-request run)
+required suites: 4, from x45dev/qrarca ci run 34421372166 narrowed to its pull-request runs 30418714800, 29703276994, 29678917186, 29668551524, 29667520845 on main
+not required: governance (frontmatter, prose, links, config-layout) (not produced by ci pull-request runs 30418714800, 29703276994, 29678917186, 29668551524, 29667520845)
 ```
 
-`governance (...)` is set aside for a second reason worth recording, because it is the cost this narrowing accepts rather than a defect: that job was renamed from `RKA governance (...)`, and the repository has had no pull request since, so no pull-request run has ever produced the current name.
+The suite lines are elided; the four required are `build & test (macos-latest)`, `build & test (ubuntu-latest)`, `build & test (windows-latest)` and `cargo-deny (...)`.
+`build & test (macos-latest)` is required again, which is the union's cost: the newest pull-request run (`30418714800`) did not produce it, but the four earlier ones did, so a suite an earlier pull request ran stays demanded.
+The single-run narrowing recorded on 2026-10-07 had set it aside.
+The original defect above is unchanged for the push-only case: a name no recent pull-request run produced is not demanded.
+
+`governance (...)` is set aside for a second reason worth recording: that job was renamed from `RKA governance (...)`, and the repository has had no pull request since, so no pull-request run has ever produced the current name.
 A suite none of those runs produced is not required, which can cost a verdict its demand and can never hand out a pass; a suite produced only by a pull-request run older than the newest five stays required; the `not required:` line is what keeps that visible instead of silent.
 `FM_CI_REQUIRED_SUITES` names the roster outright where that trade is wrong for a change.
 
@@ -305,7 +307,7 @@ The narrowing is a no-op where the two observations agree, which is the ordinary
 
 ```
 $ bin/fm-pr-ci-verify.sh https://github.com/x45dev/firstmate/pull/15
-required suites: 13, from x45dev/firstmate CI run 35724921988 narrowed to its pull-request run 35704441515 on main
+required suites: 13, from x45dev/firstmate CI run 35724921988 narrowed to its pull-request runs 35704441515, 35670380780, 35592114470, 35566102692, 35536930291 on main
 ```
 
 Thirteen suites before and after, and no `not required:` line.
@@ -353,6 +355,12 @@ $ echo $?
 ```
 
 The thirteen `CI` suite lines, green in both transcripts, are elided above; every other line is verbatim.
+
+## What was verified live
+
+The two original defects, a push-only suite demanded of a pull request and a replaced failure refusing a commit, were each reproduced live before the change was implemented, and the transcripts above record that.
+The union across recent pull-request runs, and the further scenarios of a lighter newest run not hiding an earlier suite, a red or short rollup still being refused, and a failed check replaced by a later run not refusing the commit, are verified against a stubbed GitHub API only.
+They are unconfirmed live, apart from the two roster transcripts re-recorded above.
 
 ## Refreshing this record
 
