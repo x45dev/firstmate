@@ -559,6 +559,27 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
+test_absent_endpoint_on_a_reassigned_slot_refuses() {
+  local dir id=endpointless-task other=next-task
+
+  dir=$(make_case slot-endpointless-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  # The endpoint field is gone, which cleanup may finish without only when it
+  # can prove this task's own work landed - and the copy it would have to read
+  # is now another task's, so there is nothing left that can answer for this
+  # one. Naming the claimant is what proves the refusal came from that, rather
+  # than from the landed proof simply failing on an unlanded copy.
+  claim_pool_slot "$dir" "$other"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "mode=no-mistakes" "spawn_gen=endpoint-safety-$id"
+
+  assert_refused_without_mutation "$dir" "$id" "endpointless reassigned slot"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "endpointless reassigned slot: refusal should name the task holding the copy"
+  pass "fm-teardown: a record with no endpoint whose copy was reassigned refuses, naming the claimant"
+}
+
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
   local dir id=moved-task
 
@@ -979,3 +1000,4 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+test_absent_endpoint_on_a_reassigned_slot_refuses
