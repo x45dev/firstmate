@@ -126,6 +126,7 @@ If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (the return brief's health line carries it), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
+It also owns the bounded escape: when the alert reaches nobody for `FM_WEDGE_UNREACHED_WINDOWS` windows the buffered updates go to the durable wake queue.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
 ### Submit model
