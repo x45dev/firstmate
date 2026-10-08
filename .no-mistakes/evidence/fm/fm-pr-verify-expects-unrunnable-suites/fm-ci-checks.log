@@ -1,0 +1,88 @@
+ok - a commit with no checks at all classifies as none
+ok - a rollup of nothing but a passing third-party bot classifies as no-repo-ci, not passing
+ok - no number of passing third-party checks adds up to repository CI
+ok - the passing-bot rollup recorded on PR 2584 classifies as no-repo-ci, not passing
+ok - the failing-bot rollup recorded on PR 2855 classifies as no-repo-ci, not passing
+ok - a legacy commit status does not count as a repository-owned suite
+ok - a repository-owned suite short of the full roster classifies as incomplete, not passing
+ok - the complete required-suite roster is what makes an all-green rollup passing
+ok - a rollup missing part of the required suite roster is incomplete even when everything present is green
+ok - a passing check from an unrelated repository-owned workflow is not CI having run
+ok - a partially-skipped CI workflow is refused rather than read as passing
+ok - no-repo-ci is decided ahead of failing and pending, so missing suites are never mistaken for either
+ok - any red check refuses a passing verdict, whoever produced it
+ok - a suite still running classifies as pending
+ok - an unreadable rollup is refused instead of being classified
+ok - a check run that a later run of the same check replaced is not counted against the commit
+ok - the record that stands when one is replaced is the one that was not replaced
+ok - a failed job attempt that was re-run green inside the same run is not counted
+ok - two attempts of one job with nothing to order them by are both counted
+ok - a later run of the same workflow and event replaces the earlier one, identified by workflow rather than by name
+ok - a run under a different event never replaces one under another, so a red branch is not hidden by a green merge
+ok - supersession is never declared without the identity and ordering to establish it
+ok - fm_ci_runs_state classifies a repository own workflow runs at a commit
+ok - fm_ci_runs_state ignores runs from workflows other than CI
+ok - fm_ci_runs_state refuses a skipped or neutral CI run
+ok - an unreadable workflow-runs payload is refused instead of being classified
+ok - a successful head-repository CI run whose jobs are short of the roster is incomplete, not passing
+ok - a successful CI run whose jobs were skipped is refused rather than read as a clean pass
+ok - the complete required-suite roster among the run jobs is what makes a head-repository run passing
+ok - a head-repository run missing one required suite is incomplete even when every job present is green
+ok - a run whose jobs are unreadable is incomplete rather than inheriting the verdict of the run itself
+ok - a red or unfinished job refuses a passing head-repository verdict
+ok - the run-level states are decided before the roster, so each refusal names its own cause
+ok - an unreadable runs or jobs payload is refused instead of being classified
+ok - a workflow file's declared triggers say whether a pull request can produce it at all
+ok - every spelling of an on: block this grammar accepts is read the same way
+ok - an on: block the grammar cannot read is refused, never read as declaring nothing
+ok - fm_ci_roster reads the gating workflows and the required suite roster from the repository under test
+ok - a repository whose gating workflow is not named CI is judged by its own gate
+ok - a repository gated by more than one workflow requires every one of them
+ok - only a workflow the repository ran on a push to the target branch is in its gate
+ok - a workflow a pull request cannot trigger is dropped from the gate rather than demanded of one
+ok - a repository whose every candidate is push-only is refused rather than gated by nothing
+ok - a candidate this code cannot classify refuses the whole standard rather than being dropped
+ok - a workflow renamed since an older run is one candidate under its current name, not two
+ok - a workflow deleted from or disabled in the repository is dropped from the gate, not demanded from its old runs
+ok - a workflow list one page cannot name refuses instead of resolving a gate from part of it
+ok - FM_CI_GATING_WORKFLOWS still demands a workflow the trigger test drops
+ok - an empty gate costs a verdict rather than granting one, in both shapes
+ok - a repository whose CI job names look nothing like this one still gets its own roster
+ok - fm_ci_roster falls back to the repository default branch when none is named
+ok - every roster lookup that cannot name the whole roster refuses instead of returning a short one
+ok - FM_CI_REQUIRED_SUITES overrides the lookup, and a malformed override is refused
+ok - FM_CI_GATING_WORKFLOWS overrides the gate, refusing a workflow the branch never validated
+ok - fm-pr-ci-verify.sh refuses a pull request whose repository standard it could not establish
+ok - fm-pr-ci-verify.sh verifies a repository whose whole pull request gate is a workflow named lint
+ok - the three outcomes stay distinct on a repository whose gate is not named CI
+ok - a job a gating workflow expands on a push but never on a pull request is not required of one
+ok - a pull-request run never adds a suite the target branch did not validate on a push
+ok - a lighter newest pull-request run does not hide a suite an earlier successful run produced
+ok - a gating workflow with no observed pull-request run keeps the roster its push run named
+ok - a pull-request run sharing no job name with the push run is discarded rather than used to empty the roster
+ok - a pull-request run whose jobs run past one page is discarded rather than used short
+ok - fm-pr-ci-verify.sh verifies a pull request on a repository whose gate expands a wider matrix on a push
+ok - a pull request short of the suites a pull request can produce is still refused
+ok - fm-pr-ci-verify.sh verifies a pull request on a repository whose deploy workflow is push-only
+ok - a pull request short of the suites its repository can produce is still refused
+ok - a red suite on a repository with a push-only deploy is still refused
+ok - zero checks is still a refusal on a repository whose deploy workflow is push-only
+ok - fm-pr-ci-verify.sh accepts a repository whose own two-job roster ran and passed
+ok - a rollup short of the repository own roster is still incomplete, not passing
+ok - fm-pr-ci-verify.sh refuses a pull request whose only check is a third-party bot
+ok - fm-pr-ci-verify.sh accepts a pull request whose own suites ran and passed
+ok - fm-pr-ci-verify.sh refuses a pull request whose rollup is short of the required suite roster
+ok - fm-pr-ci-verify.sh refuses a red suite
+ok - fm-pr-ci-verify.sh refuses a pull request carrying no checks
+ok - fm-pr-ci-verify.sh accepts a commit the head repository validated while the upstream run is held
+ok - a fork-validated verdict still states that the base repository ran no suite of its own
+ok - fm-pr-ci-verify.sh falls through an incomplete base-repo rollup to a validated head-repository run
+ok - fm-pr-ci-verify.sh refuses a successful head-repository run whose jobs are short of the required roster
+ok - fm-pr-ci-verify.sh refuses a head-repository run that concluded success with a skipped job
+ok - fm-pr-ci-verify.sh refuses both recorded lone-bot pull requests, whichever way the bot concluded
+ok - fm-pr-ci-verify.sh refuses a commit whose head-repository run failed
+ok - fm-pr-ci-verify.sh refuses a commit whose head-repository run has not finished
+ok - fm-pr-ci-verify.sh refuses a commit no repository has validated and says where to run it
+ok - a passing head-repository run never overturns a red suite in the base repository
+ok - fm-pr-ci-verify.sh refuses a GitLab merge request rather than misreading it
+ok - fm-pr-ci-verify.sh refuses a malformed pull request URL
