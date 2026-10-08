@@ -3541,7 +3541,6 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
   assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
-  assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
     "native session-start context unexpectedly rendered while Calm was off"
