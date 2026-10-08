@@ -3749,19 +3749,55 @@ JS
     || fail "Chrome or Chromium is required for rendered export DOM assertions; set FM_CHROME_BIN to one"
   chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
     || fail "could not render calm-mode HTML export DOM: $chrome_report"
+  # Every condition below names itself and prints what it saw before failing.
+  # This check needs a real Chrome render of a real Pi export, so it can only run
+  # where both exist, which in practice is CI; a bare exit status there says only
+  # that one of eight conditions broke, and the next step has to be guessed. The
+  # names and excerpts are what make a failure here diagnosable from the CI log
+  # alone, so they are part of the assertion rather than scaffolding to remove.
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
+const violations = [];
+const violate = (condition, evidence) => violations.push({ condition, evidence });
+const near = (haystack, needle, span = 220) => {
+  const at = haystack.indexOf(needle);
+  if (at < 0) return "(not present)";
+  return JSON.stringify(haystack.slice(Math.max(0, at - span), at + span));
+};
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
 const tree = dom.match(/<div[^>]*id="tree-container"[^>]*>([\s\S]*?)<div[^>]*id="tree-status"/)?.[1];
-if (!messages || !tree) process.exit(1);
-if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) process.exit(1);
-if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
-if (messages.includes('<div class="hook-message"')) process.exit(1);
-if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
-for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
-  if (!messages.includes(current)) process.exit(1);
+if (!messages || !tree) {
+  violate("conversation and tree regions are both locatable", `dom_bytes=${dom.length} messages_region=${messages ? "found" : "missing"} tree_region=${tree ? "found" : "missing"}`);
+} else {
+  if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) {
+    violate("the genuine user prompt is rendered as a user message", `user_message_divs=${(messages.match(/<div class="user-message"/g) ?? []).length} prompt_text=${messages.includes("Show a deterministic tool example.") ? "present" : "absent"} first_user_div=${near(messages, '<div class="user-message"', 160)}`);
+  }
+  if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) {
+    violate("the genuine assistant reply is rendered as an assistant message", `assistant_message_divs=${(messages.match(/<div class="assistant-message"/g) ?? []).length} reply_text=${messages.includes("The deterministic tool example is complete.") ? "present" : "absent"} first_assistant_div=${near(messages, '<div class="assistant-message"', 160)}`);
+  }
+  if (messages.includes('<div class="hook-message"')) {
+    violate("no hook message is rendered into the conversation", near(messages, '<div class="hook-message"'));
+  }
+  if (messages.includes("[firstmate-synthetic-input]")) {
+    violate("the synthetic operational input is not rendered into the conversation", near(messages, "[firstmate-synthetic-input]"));
+  }
+  for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
+    if (!messages.includes(current)) {
+      violate(`the export preserves operational input ${current}`, `${current} absent from the conversation region; in_whole_dom=${dom.includes(current) ? "yes" : "no"}`);
+    }
+  }
+  for (const needle of ["firstmate-synthetic-input", "/tmp/probe.status"]) {
+    if (!tree.includes(needle)) {
+      violate(`the tree view preserves ${needle}`, `${needle} absent from the tree region; in_whole_dom=${dom.includes(needle) ? "yes" : "no"}`);
+    }
+  }
 }
-if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
+if (violations.length === 0) process.exit(0);
+for (const { condition, evidence } of violations) {
+  console.error(`rendered export DOM violation: ${condition}`);
+  console.error(`  evidence: ${evidence}`);
+}
+process.exit(1);
 JS
   # Calm returns the transcript to its own presentation once the export has been
   # rendered. That repaint runs on the macrotask right after Pi prints the export
