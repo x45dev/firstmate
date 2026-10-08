@@ -1,7 +1,7 @@
 # Gating workflow resolution verification
 
 Empirical record for how `bin/fm-ci-checks-lib.sh` decides which workflows are a repository's pull request gate, and for the three outcomes `bin/fm-pr-ci-verify.sh` must keep apart while doing it.
-The resolution queries and the two-outcome transcripts under "The push-only deploy" were run on 2026-09-10; the transcripts under "The three outcomes, live" were run on 2026-09-02; those under "The roster narrowed to what a pull request produces" and "A check that reported again on the same commit" were run on 2026-10-07.
+The resolution queries and the two-outcome transcripts under "The push-only deploy" were run on 2026-09-10; the transcripts under "The three outcomes, live" were run on 2026-09-02; those under "A check that reported again on the same commit" were run on 2026-10-07, and the roster transcripts under "The roster narrowed to what a pull request produces" were re-recorded on 2026-10-08.
 Every output is reproduced exactly.
 
 The guarantee this record supports: the gate follows the repository under test, so a repository whose gating workflow is not named `CI` is answered rather than refused, a workflow no pull request can trigger is not demanded of one, a job no pull request of a gating workflow produces is not demanded either, a check record that a later report of the same check replaced is not counted, and a green verdict is still granted only on evidence.
