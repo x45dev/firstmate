@@ -1010,3 +1010,41 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+### The Linux channel, selected but not banner-proven
+
+The `notify-send` channel's selection, its absence handling, and the delivery verdict it produces are proven deterministically by `tests/fm-daemon.test.sh`.
+The real libnotify banner is **not** proven on this host, because the binary is absent:
+
+```sh
+$ uname -s; command -v notify-send || echo ABSENT
+Linux
+ABSENT
+```
+
+That absence is why `wedge_alarm_platform_default` guards the channel on `command -v` rather than on the platform alone: on this host `auto` still resolves to no channel, and the bounded escape below is what covers it.
+The banner itself needs the same bounded manual pass the macOS and Herdr channels above had, on a Linux host with libnotify installed, before it can be recorded as proven.
+
+### The bounded escape from an undeliverable away window
+
+Verified deterministically on 2026-10-08, on this branch above `9a9ee324`:
+
+```sh
+bin/fm-test-run.sh tests/fm-daemon.test.sh tests/fm-composer-lib.test.sh
+```
+
+```text
+ok - auto resolves to the Linux notify-send notifier and reports the alert as delivered
+ok - auto with no resolvable platform channel reports the alert as unreached
+ok - an alert the owner turned off reports disabled, never unreached
+ok - an alert whose every channel failed reports unreached
+ok - an away window whose updates and alert both reach nobody hands them to the durable wake queue
+ok - the escape waits for its bound; the ordinary alarm still runs below it
+ok - a long undeliverable window queues exactly one row, however many windows pass
+ok - a host whose alert channel reaches the owner never escapes to the wake queue
+ok - the durable away-delivery record states the outcome, the cost and the reason in plain language
+ok - fm_composer_verdict_reason: every verdict has a plain-language reason and an unknown one degrades safely
+```
+
+The escape tests set the alert up to reach nobody by faking a platform with no built-in channel at all, which is deterministic on any host; asserting the absence of a libnotify binary would not be.
+The composer verdict those tests drive is `unknown` on an input box with no container proof, which is the same verdict the field log recorded for every one of its 4,402 consecutive deferrals.

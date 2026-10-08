@@ -1396,6 +1396,22 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# The ONE owner of the human-readable reason behind a verdict. Every verdict
+# this library can return has exactly one plain-language sentence fragment
+# here, so a caller that has to tell a person why a delivery did not happen
+# never invents its own phrasing and never leaks the verdict token itself. An
+# unrecognized verdict reads as unreadable, which is the safe description: the
+# caller could not establish the input box was ready either way.
+fm_composer_verdict_reason() {  # <verdict>
+  case "${1:-}" in
+    empty) printf 'its input box was empty and ready' ;;
+    pending) printf 'unsent text was already sitting in its input box' ;;
+    pending-unproven) printf 'its input box may hold unsent text and could not be read clearly enough to be sure' ;;
+    need-identity) printf 'the agent running there never reported its own state' ;;
+    *) printf 'its input box could not be read at all' ;;
+  esac
+}
+
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
   local screen=$1 styled=$2 row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))

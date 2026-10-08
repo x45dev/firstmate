@@ -215,6 +215,27 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
+# Set by wedge_alarm_notify to delivered|disabled|unreached; see its header.
+WEDGE_ALARM_LAST_DELIVERED=unreached
+# The current wedge episode, held in this process rather than on disk. A daemon
+# restart is a new episode by definition, and keeping the episode here means it
+# needs no entry in the away delivery-artifact lifecycle that bin/fm-afk-start.sh,
+# bin/fm-afk-launch.sh and bin/fm-afk-return.sh each clear by name - four lists
+# that would have to be kept in step with these for no gain.
+#   INJECT_LAST_REASON     the token behind the latest refused delivery
+#   WEDGE_UNREACHED_COUNT  consecutive undelivered windows whose alert reached nobody
+#   WEDGE_UNREACHED_QUEUED 1 once this episode has handed its row to the wake queue
+INJECT_LAST_REASON=
+WEDGE_UNREACHED_COUNT=0
+WEDGE_UNREACHED_QUEUED=0
+# How many consecutive undelivered windows may pass with the alert reaching
+# nobody before the daemon stops relying on its own alert channels and hands
+# the escalation to the home's durable wake queue instead (escalate_unreached).
+# The bound exists because an alert channel that reaches nobody used to be
+# indistinguishable, to this daemon, from one that reached the owner: the
+# measured consequence was 4,402 consecutive deferrals across two days with
+# zero deliveries and no signal outside this log.
+WEDGE_UNREACHED_WINDOWS_DEFAULT=3
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -712,7 +733,12 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    escalate_unreached_reset
+    return 0
+  fi
   return 1
 }
 
@@ -734,13 +760,18 @@ escalate_flush() {  # <state>
 # single directive. Directives:
 #   off              disable the active alert entirely, regardless of position
 #                    (marker + flash remain)
-#   auto | default   platform default: macOS -> osascript; otherwise none
+#   auto | default   platform default: macOS -> osascript, Linux -> notify-send
 #   osascript        macOS Notification Center banner (backend-independent)
+#   notify-send      Linux desktop notification (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
 #   command:<cmd>    run <cmd> via `sh -c`, summary on $1 and on stdin
-# An absent config means auto, i.e. default-ON on macOS: the alarm's whole
-# purpose is to never be silent, so the reachable OS channel fires unless the
-# captain explicitly disables it.
+# An absent config means auto, i.e. default-ON wherever the platform has a
+# reachable OS channel: the alarm's whole purpose is to never be silent, so that
+# channel fires unless the captain explicitly disables it. An OS banner only
+# reaches an owner who is AT the machine, which the away posture often is not,
+# so `command:` stays the route to a phone or pager - and when no channel
+# reaches anyone at all, the bounded escape in escalate_unreached takes over
+# rather than the daemon retrying in silence.
 
 # Print the configured channel directives, one per line. FM_WEDGE_ALARM_CHANNEL
 # wins (a single directive); else each non-empty, non-comment line of
@@ -766,12 +797,15 @@ wedge_alarm_configured_channels() {
 }
 
 # Resolve the platform's default OS-level channel for `auto`. macOS reaches the
-# captain via an osascript Notification Center banner; other platforms have no
-# built-in OS channel (the captain wires a command: directive), so this prints
-# nothing and wedge_alarm_notify logs that the marker is the only signal.
+# captain via an osascript Notification Center banner and Linux via a libnotify
+# desktop notification; each is used only when its binary is actually present,
+# so a headless host resolves to nothing rather than to a channel that cannot
+# fire. A platform with no resolvable channel prints nothing, and the caller
+# then has no delivery to report, which is what arms the bounded escape.
 wedge_alarm_platform_default() {
   case "$(uname)" in
     Darwin) command -v osascript >/dev/null 2>&1 && printf 'osascript' ;;
+    Linux) command -v notify-send >/dev/null 2>&1 && printf 'notify-send' ;;
     *) : ;;
   esac
 }
@@ -858,9 +892,30 @@ wedge_alarm_via_osascript() {  # <summary>
   command -v osascript >/dev/null 2>&1 || {
     log "wedge alarm: osascript not found; cannot post a macOS notification"; return 1; }
   wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED" sound name "Basso"' \
+    -e 'display notification (item 1 of argv) with title "firstmate: away updates are not reaching you" sound name "Basso"' \
     -e 'end run' "$summary" >/dev/null 2>&1 && return 0
   log "wedge alarm: osascript notification failed"
+  return 1
+}
+
+# Post a Linux desktop notification through libnotify. `notify-send` is
+# OS-level, independent of any terminal pane or multiplexer status-line, and is
+# the Linux counterpart of the macOS banner above. The summary is passed as an
+# argv item, never interpolated into a shell string. Best-effort: logs and
+# returns 1 on failure.
+wedge_alarm_via_notify_send() {  # <summary>
+  local summary=$1 rc
+  wedge_alarm_os_notifier_override notify-send "$summary"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  command -v notify-send >/dev/null 2>&1 || {
+    log "wedge alarm: notify-send not found; cannot post a desktop notification"; return 1; }
+  wedge_alarm_run_bounded notify-send notify-send --urgency=critical \
+    "firstmate: away updates are not reaching you" "$summary" >/dev/null 2>&1 && return 0
+  log "wedge alarm: notify-send notification failed"
   return 1
 }
 
@@ -876,7 +931,7 @@ wedge_alarm_via_herdr() {  # <summary>
   esac
   command -v herdr >/dev/null 2>&1 || {
     log "wedge alarm: herdr not found; cannot post a herdr notification"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away updates are not reaching you" \
     --body "$summary" --sound request >/dev/null 2>&1 && return 0
   log "wedge alarm: herdr notification failed"
   return 1
@@ -914,6 +969,7 @@ wedge_alarm_emit() {  # <channel> <summary>
   esac
   case "$channel" in
     osascript) wedge_alarm_via_osascript "$summary" ;;
+    notify-send) wedge_alarm_via_notify_send "$summary" ;;
     herdr) wedge_alarm_via_herdr "$summary" ;;
     command) wedge_alarm_via_command "$cmd" "$summary" ;;
   esac
@@ -924,54 +980,165 @@ wedge_alarm_emit() {  # <channel> <summary>
 # `off` directive disables the alert, regardless of position; an unresolvable
 # `auto` (no OS channel on this platform) logs that the durable marker is the
 # only signal. Every notifier routes through the test-forced recorder seam.
+#
+# The return code deliberately stays 0, so this function reports WHETHER THE
+# ALERT REACHED ANYONE in WEDGE_ALARM_LAST_DELIVERED instead:
+#   delivered  at least one channel ran and reported success
+#   disabled   the owner turned the alert off, so silence is what they asked for
+#   unreached  every channel failed, or no channel could be resolved at all
+# That distinction is the whole point. Without it this daemon could not tell an
+# alert that reached the owner from one that reached nobody, so it kept retrying
+# in silence for as long as the wedge lasted; `unreached` is what arms the
+# bounded escape in escalate_unreached.
 wedge_alarm_notify() {  # <summary> <marker>
   local summary=$1 marker=$2 ch
   local -a channels=()
+  WEDGE_ALARM_LAST_DELIVERED=unreached
   while IFS= read -r ch; do
     [ -n "$ch" ] || continue
     channels+=("$ch")
   done < <(wedge_alarm_configured_channels)
   for ch in "${channels[@]}"; do
-    [ "$ch" = off ] && return 0
+    if [ "$ch" = off ]; then
+      WEDGE_ALARM_LAST_DELIVERED=disabled
+      return 0
+    fi
   done
   for ch in "${channels[@]}"; do
     case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
     case "$ch" in
       '') log "wedge alarm: no OS-level alert channel on $(uname); durable marker $marker is the only signal - set config/wedge-alarm (e.g. a command: directive)" ;;
-      osascript|herdr) wedge_alarm_emit "$ch" "$summary" || true ;;
-      command:*) wedge_alarm_emit command "$summary" "${ch#command:}" || true ;;
+      osascript|notify-send|herdr) wedge_alarm_emit "$ch" "$summary" && WEDGE_ALARM_LAST_DELIVERED=delivered ;;
+      command:*) wedge_alarm_emit command "$summary" "${ch#command:}" && WEDGE_ALARM_LAST_DELIVERED=delivered ;;
       *) log "wedge alarm: unrecognized active-alert channel directive (redacted); marker still written" ;;
     esac
   done
   return 0
 }
 
+# --- why delivery failed, in the owner's words ------------------------------
+# inject_msg records the token behind its latest refusal so the alarm can say
+# WHAT HAPPENED rather than name a guard. Without this the alarm could only
+# report that something was undelivered, which is the state the owner already
+# inferred from the silence; the useful half is which of the guards refused and
+# why, because a pane holding someone's unsent text and a pane that cannot be
+# read at all call for different actions.
+inject_reason_record() {  # <token>
+  INJECT_LAST_REASON=$1
+}
+
+# Render the recorded token as one plain-language clause. The composer verdicts
+# are rendered by their own owner (fm_composer_verdict_reason in
+# bin/fm-composer-lib.sh) so this daemon never carries a second copy of that
+# vocabulary.
+inject_reason_phrase() {
+  local token=$INJECT_LAST_REASON
+  case "$token" in
+    busy) printf 'it was mid-turn on something else' ;;
+    composer:*) fm_composer_verdict_reason "${token#composer:}" ;;
+    submit:*) printf 'the update was typed in but the send was never confirmed' ;;
+    *) printf 'the reason could not be established' ;;
+  esac
+}
+
+# --- the bounded escape ----------------------------------------------------
+# Hand the buffered escalation to the home's durable wake queue once the active
+# alert has reached nobody for WEDGE_UNREACHED_WINDOWS consecutive undelivered
+# windows.
+#
+# WHY THIS EXISTS: before it, an away window whose alert channel reached nobody
+# had no escape at all. The composer guard is right to refuse an unreadable
+# pane - typing an escalation into something that might be a shell is worse
+# than not delivering it - and the max-defer flush re-enters that same guard,
+# so retrying cannot help. The only designed escape was the active alert, and
+# on a host where `auto` resolves to no channel that alert was a no-op whose
+# failure was itself invisible. Measured consequence: 4,402 consecutive
+# deferrals over two days, zero deliveries, and four separate away windows -
+# the longest ten hours - in which a merged pull request, four workers blocked
+# on one steer each, and two decisions waiting on the owner surfaced only when
+# they came back.
+#
+# The wake queue is the escape because it needs nothing that is broken here: no
+# pane, no composer, no alert channel, and no configuration. A queued `check`
+# row is durable until acknowledged and is presented as the first work queue by
+# every ordinary firstmate surface - the next drain, the next session start, and
+# the away-return brief - so the escalation reaches the owner by whichever
+# surface they open first instead of only by the one that is wedged.
+#
+# It is BOUNDED in both directions: it arms only after the alert has
+# demonstrably reached nobody that many windows in a row, and it fires at most
+# once per wedge episode, so a ten-hour wedge produces one queued row rather
+# than one per window. A successful flush ends the episode
+# (escalate_unreached_reset), so the next wedge starts the count again.
+escalate_unreached() {  # <state> <age-seconds>
+  local state=$1 age=$2 bound items
+  bound=${FM_WEDGE_UNREACHED_WINDOWS:-$WEDGE_UNREACHED_WINDOWS_DEFAULT}
+  case "$bound" in
+    ''|*[!0-9]*) bound=$WEDGE_UNREACHED_WINDOWS_DEFAULT ;;
+  esac
+  [ "$bound" -gt 0 ] 2>/dev/null || return 0
+  WEDGE_UNREACHED_COUNT=$((WEDGE_UNREACHED_COUNT + 1))
+  [ "$WEDGE_UNREACHED_COUNT" -ge "$bound" ] || return 0
+  [ "$WEDGE_UNREACHED_QUEUED" -eq 1 ] && return 0
+  items=$(wc -l < "$state/.subsuper-escalations" 2>/dev/null) || items=0
+  case "$items" in ''|*[!0-9]*) items=0 ;; esac
+  if command -v fm_wake_append >/dev/null 2>&1 \
+     && fm_wake_append check away-escalations-undelivered \
+          "$items away update(s) could not be delivered to this session for ${age}s and no alert reached you - $(inject_reason_phrase); they are listed in $state/.subsuper-inject-wedged"; then
+    WEDGE_UNREACHED_QUEUED=1
+    log "ERROR: away updates undeliverable and no alert reached anyone after $WEDGE_UNREACHED_COUNT windows; handed $items item(s) to the durable wake queue"
+  else
+    log "ERROR: away updates undeliverable and no alert reached anyone after $WEDGE_UNREACHED_COUNT windows; the durable wake queue could not be reached either, so $state/.subsuper-inject-wedged is the only remaining record"
+  fi
+}
+
+# End the current wedge episode. Called wherever delivery succeeds, so the next
+# wedge counts its unreached windows from zero and may queue its own row.
+escalate_unreached_reset() {
+  WEDGE_UNREACHED_COUNT=0
+  WEDGE_UNREACHED_QUEUED=0
+  INJECT_LAST_REASON=
+}
+
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
-# an ERROR, drops a durable marker firstmate/recovery can surface, flashes
+# max-defer (this session is genuinely mid-turn, its input box cannot be read,
+# or the send is never confirmed). The daemon must NEVER stall silently: this
+# logs an ERROR, drops a durable marker firstmate/recovery can surface, flashes
 # the tmux supervisor client's status line when applicable, and attempts a
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
-# is lost - the buffer and the
-# wake-queue both survive - but the stall stops being invisible.
+# is lost - the buffer and the wake-queue both survive - but the stall stops
+# being invisible.
+#
+# WORDING IS PART OF THE CONTRACT HERE. When every other channel has failed,
+# this marker and this alert are the only things that reach the owner, so they
+# say what happened and what it costs in the owner's own nouns, not in the
+# names of the guards that refused. "Away updates are not reaching you" is
+# readable from a phone banner; "inject WEDGED" is not.
+#
+# When the alert reaches nobody, escalate_unreached takes over at its bound.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 items reason
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
   if [ "$(_file_age "$marker")" -lt "$max_defer" ]; then
     return 0
   fi
+  items=$(wc -l < "$state/.subsuper-escalations" 2>/dev/null) || items=0
+  case "$items" in ''|*[!0-9]*) items=0 ;; esac
+  reason=$(inject_reason_phrase)
   now=$(_now)
   if [ "$WEDGE_ALARM_LAST_EPOCH" -gt 0 ] && [ $((now - WEDGE_ALARM_LAST_EPOCH)) -lt "$max_defer" ]; then
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: $items away update(s) have not reached this session for ${age}s because $reason. Nothing is lost - the updates and the wake queue are both kept - but the owner has not seen them."
   fi
   {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+    printf 'Away updates are not reaching you: %s waiting, oldest %ss old, as of %s\n' \
+      "$items" "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    printf 'They could not be delivered to this session because %s.\n' "$reason"
+    printf 'Nothing is lost. These are the updates still waiting:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
   } 2>/dev/null > "$marker" || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
@@ -981,7 +1148,8 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
-    tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
+    tmux display-message -t "$target" \
+      "fm: $items away update(s) are not reaching you (${age}s) - see $marker" 2>/dev/null || true
   fi
   # Backend-independent active alert. Unlike the tmux flash above (skipped on
   # every non-tmux backend), this can reach the captain even when every pane and
@@ -989,8 +1157,15 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify \
+      "$items away update(s) are not reaching you - waiting ${age}s because $reason. Details: $marker" \
+      "$marker"
+    # The bounded escape. An alert the owner switched off is silence they asked
+    # for; an alert that reached nobody is the failure this guards, and it is
+    # the one case where retrying the same channels cannot help.
+    [ "$WEDGE_ALARM_LAST_DELIVERED" = unreached ] && escalate_unreached "$state" "$age"
   fi
+  return 0
 }
 
 _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first arrived (sidecar epoch)
@@ -1267,6 +1442,7 @@ inject_msg() {  # <message> [state]
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
+    inject_reason_record busy
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1281,6 +1457,7 @@ inject_msg() {  # <message> [state]
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    inject_reason_record "composer:${composer:-unknown}"
     return 1
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
@@ -1294,9 +1471,11 @@ inject_msg() {  # <message> [state]
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
+    INJECT_LAST_REASON=
     return 0  # Backend confirmed the submit.
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  inject_reason_record "submit:${verdict:-unknown}"
   return 1
 }
 

@@ -2186,7 +2186,7 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
 # log, so they verify channel SELECTION and summary propagation; the real
 # osascript/herdr argv is verified once by the bounded manual evidence in
 # docs/wedge-alarm.md, never from a suite.
-make_wedge_case() {  # <name> -> echoes dir; creates state/, fakebin/{uname,osascript,herdr}, alert.log
+make_wedge_case() {  # <name> -> echoes dir; creates state/, fakebin/{uname,osascript,notify-send,herdr}, alert.log
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
@@ -2206,7 +2206,12 @@ SH
 printf '%s\n' herdr >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
 exit 0
 SH
-  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr"
+  cat > "$fakebin/notify-send" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' notify-send >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr" "$fakebin/notify-send"
   : > "$dir/alert.log"
   printf '%s\n' "$dir"
 }
@@ -2358,13 +2363,67 @@ test_wedge_alarm_auto_darwin_selects_osascript() {
   pass "auto resolves to the macOS osascript notifier on Darwin (default-on)"
 }
 
-test_wedge_alarm_auto_non_darwin_has_no_os_channel() {
+test_wedge_alarm_auto_linux_selects_notify_send() {
+  # The measured gap behind the away-delivery item: on this Linux host `auto`
+  # resolved to NOTHING, so the alarm that is supposed to be the escape from an
+  # undeliverable away update was a no-op, four separate away windows running.
+  # Linux reaches the owner through libnotify exactly as macOS does through
+  # Notification Center.
   local dir log
   dir=$(make_wedge_case wedge-auto-linux); log="$dir/alert.log"
   PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
-    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
-  [ ! -s "$log" ] || fail "auto selected a built-in OS channel on a non-macOS platform: $(cat "$log")"
-  pass "auto on a non-macOS platform selects no built-in OS channel (the marker or a configured command carries it)"
+    wedge_alarm_notify "2 away updates are not reaching you" "/s/.marker"
+  grep -F 'notify-send' "$log" >/dev/null \
+    || fail "auto did not resolve to notify-send on Linux: $(cat "$log")"
+  [ "$WEDGE_ALARM_LAST_DELIVERED" = delivered ] \
+    || fail "a fired Linux channel was not reported as delivered: $WEDGE_ALARM_LAST_DELIVERED"
+  pass "auto resolves to the Linux notify-send notifier and reports the alert as delivered"
+}
+
+test_wedge_alarm_auto_without_a_platform_channel_reports_unreached() {
+  # A platform with no built-in OS channel at all, and a Linux host whose
+  # libnotify binary is absent, are the same case: nothing was reached. The
+  # verdict must say so, because that verdict is what arms the bounded escape.
+  local dir log emptybin
+  dir=$(make_wedge_case wedge-auto-nochannel); log="$dir/alert.log"
+  emptybin="$dir/emptybin"; mkdir -p "$emptybin"
+  cp "$dir/fakebin/uname" "$emptybin/uname"
+  PATH="$emptybin:/nonexistent-for-this-test" FM_WEDGE_ALARM_LOG="$log" \
+    FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "2 away updates are not reaching you" "/s/.marker"
+  [ ! -s "$log" ] || fail "auto fired a channel with no notifier binary present: $(cat "$log")"
+  [ "$WEDGE_ALARM_LAST_DELIVERED" = unreached ] \
+    || fail "an alert that reached nobody was not reported unreached: $WEDGE_ALARM_LAST_DELIVERED"
+  pass "auto with no resolvable platform channel reports the alert as unreached"
+}
+
+test_wedge_alarm_off_reports_disabled_not_unreached() {
+  # Silence the owner asked for is not the failure the escape guards against,
+  # so `off` must never arm it.
+  local dir log
+  dir=$(make_wedge_case wedge-off-disabled); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=off \
+    wedge_alarm_notify "2 away updates are not reaching you" "/s/.marker"
+  [ "$WEDGE_ALARM_LAST_DELIVERED" = disabled ] \
+    || fail "a deliberately disabled alert was not reported disabled: $WEDGE_ALARM_LAST_DELIVERED"
+  pass "an alert the owner turned off reports disabled, never unreached"
+}
+
+test_wedge_alarm_every_channel_failing_reports_unreached() {
+  local dir log failing
+  dir=$(make_wedge_case wedge-all-fail); log="$dir/alert.log"
+  failing="$dir/failing-notifier"
+  cat > "$failing" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$failing"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_EXEC="$failing" \
+    FM_WEDGE_ALARM_CHANNEL=$'osascript\nherdr\n' \
+    wedge_alarm_notify "2 away updates are not reaching you" "/s/.marker"
+  [ "$WEDGE_ALARM_LAST_DELIVERED" = unreached ] \
+    || fail "every channel failing was not reported unreached: $WEDGE_ALARM_LAST_DELIVERED"
+  pass "an alert whose every channel failed reports unreached"
 }
 
 test_wedge_alarm_config_file_multi_channel() {
@@ -2469,6 +2528,134 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
   pass "daemon shutdown stops and reaps the active notifier process group"
 }
 
+# --- the bounded escape from an undeliverable away window -------------------
+# These pin the defect behind the away-delivery item. Reproduced before the fix:
+# an unreadable supervisor input box on a Linux host with no configured alarm
+# channel deferred every single delivery (the field log recorded 4,402
+# consecutive deferrals, all on an unreadable input box, across two days), the
+# alert resolved to no channel at all, and nothing changed however long that
+# lasted. The owner saw a merged pull request, four blocked workers and two
+# waiting decisions only when they came back.
+
+# Drive <windows> genuine undelivered windows past an unreadable input box with
+# no alarm channel, and echo the fixture dir. FM_MAX_DEFER_SECS is 1 so each
+# pass is a real window to both of inject_wedge_alarm's throttles (the marker's
+# own age and the per-window notify epoch) rather than a compressed loop. Extra
+# NAME=VALUE arguments are exported for the housekeeping calls only.
+run_unreached_windows() {  # <name> <windows> [NAME=VALUE...]
+  local name=$1 windows=$2 dir state capture emptybin i
+  shift 2
+  dir=$(make_supercase "$name"); state="$dir/state"
+  capture="$dir/pane.txt"
+  # No container proof anywhere: the shared classifier cannot call this ready.
+  printf 'some transcript line\n\n\n' > "$capture"
+  # `auto` must resolve to NO channel, which is the state the item was filed
+  # from. A platform with no built-in channel at all gives that deterministically
+  # on any CI host, where asserting the absence of a libnotify binary would not;
+  # test_wedge_alarm_auto_without_a_platform_channel_reports_unreached covers
+  # the Linux-without-libnotify form of the same verdict.
+  emptybin="$dir/emptybin"; mkdir -p "$emptybin"
+  cat > "$emptybin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'FreeBSD\n'
+SH
+  chmod +x "$emptybin/uname"
+  mkdir -p "$dir/config"   # present and empty: no config/wedge-alarm
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  escalate_add "$state" "done: PR https://example.invalid/x/y/pull/23 checks green"
+  escalate_add "$state" "blocked: branch custody stranded"
+  afk_enter "$state"
+  escalate_unreached_reset
+  WEDGE_ALARM_LAST_EPOCH=0
+  for i in $(seq 1 "$windows"); do
+    echo $(( $(date +%s) - 36000 )) > "$state/.subsuper-escalations.since"
+    local var
+    for var in "$@"; do export "${var?}"; done
+    PATH="$emptybin:$dir/fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" \
+      FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
+      LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=1 \
+      housekeeping "$state"
+    for var in "$@"; do unset "${var%%=*}"; done
+    [ "$i" -lt "$windows" ] && sleep 1.2
+  done
+  printf '%s\n' "$dir"
+}
+
+test_undeliverable_away_window_hands_the_updates_to_the_wake_queue() {
+  local dir state rows
+  dir=$(run_unreached_windows unreached-escape 3)
+  state="$dir/state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "the undelivered updates were dropped instead of kept"
+  rows=$(grep -c 'away-escalations-undelivered' "$state/.wake-queue" 2>/dev/null || true)
+  [ "${rows:-0}" -eq 1 ] \
+    || fail "an undeliverable away window did not hand exactly one row to the durable wake queue (got ${rows:-0})"
+  grep -F 'check' "$state/.wake-queue" >/dev/null \
+    || fail "the queued escape row is not a check wake firstmate acts on"
+  grep -F 'no alert reached you' "$state/.wake-queue" >/dev/null \
+    || fail "the queued row does not say the alert reached nobody"
+  pass "an away window whose updates and alert both reach nobody hands them to the durable wake queue"
+}
+
+test_undeliverable_away_window_does_not_escape_before_the_bound() {
+  local dir state rows
+  dir=$(run_unreached_windows unreached-below-bound 2)
+  state="$dir/state"
+  rows=$(grep -c 'away-escalations-undelivered' "$state/.wake-queue" 2>/dev/null || true)
+  [ "${rows:-0}" -eq 0 ] \
+    || fail "the escape fired before its bound of three undelivered windows"
+  [ -s "$state/.subsuper-inject-wedged" ] \
+    || fail "the ordinary alarm did not run below the bound"
+  pass "the escape waits for its bound; the ordinary alarm still runs below it"
+}
+
+test_undeliverable_away_window_escapes_once_not_once_per_window() {
+  # A ten-hour wedge produced roughly one alert attempt per five minutes. The
+  # escape must leave one row for the owner to act on, not a hundred.
+  local dir state rows
+  dir=$(run_unreached_windows unreached-once 5)
+  state="$dir/state"
+  rows=$(grep -c 'away-escalations-undelivered' "$state/.wake-queue" 2>/dev/null || true)
+  [ "${rows:-0}" -eq 1 ] \
+    || fail "a long undeliverable window queued ${rows:-0} rows instead of one"
+  pass "a long undeliverable window queues exactly one row, however many windows pass"
+}
+
+test_reachable_alert_never_escapes_to_the_wake_queue() {
+  # The escape exists only because the alert reached nobody. A host whose alert
+  # channel works must keep using it and queue nothing.
+  local dir state rows
+  dir=$(run_unreached_windows unreached-reachable 5 \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_WEDGE_ALARM_EXEC=discard)
+  state="$dir/state"
+  rows=$(grep -c 'away-escalations-undelivered' "$state/.wake-queue" 2>/dev/null || true)
+  [ "${rows:-0}" -eq 0 ] \
+    || fail "a working alert channel still escaped to the wake queue (${rows:-0} rows)"
+  pass "a host whose alert channel reaches the owner never escapes to the wake queue"
+}
+
+test_wedge_marker_states_the_outcome_and_the_reason() {
+  # The marker and the alert are the only things that reach the owner when every
+  # other channel has failed, so they say what happened and what it costs, in
+  # the owner's nouns and not in the names of the guards that refused.
+  local dir state marker
+  dir=$(run_unreached_windows unreached-wording 1)
+  state="$dir/state"; marker="$state/.subsuper-inject-wedged"
+  [ -s "$marker" ] || fail "no durable record was written"
+  grep -F 'Away updates are not reaching you' "$marker" >/dev/null \
+    || fail "the record does not lead with the outcome: $(head -1 "$marker")"
+  grep -F '2 waiting' "$marker" >/dev/null \
+    || fail "the record does not say how much is waiting: $(head -1 "$marker")"
+  grep -F 'input box could not be read' "$marker" >/dev/null \
+    || fail "the record does not say why delivery failed: $(cat "$marker")"
+  grep -F 'Nothing is lost' "$marker" >/dev/null \
+    || fail "the record does not say the updates are kept"
+  if grep -Eq 'WEDGED|inject|composer|supervisor pane' "$marker"; then
+    fail "the record still reports internal vocabulary: $(cat "$marker")"
+  fi
+  pass "the durable away-delivery record states the outcome, the cost and the reason in plain language"
+}
+
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   # The whole incident: a non-tmux (herdr) primary gets NO tmux status-line
   # flash, so inject_wedge_alarm must still emit the backend-independent alert
@@ -2482,7 +2669,10 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
     inject_wedge_alarm "$state" 30600
   [ -s "$state/.subsuper-inject-wedged" ] || fail "inject_wedge_alarm did not write the durable marker"
   grep -F 'osascript' "$log" >/dev/null || fail "inject_wedge_alarm did not emit the active alert on a non-tmux backend: $(cat "$log")"
-  grep -F 'WEDGED 30600s' "$log" >/dev/null || fail "active alert missing the age and summary"
+  grep -F 'waiting 30600s' "$log" >/dev/null \
+    || fail "the active alert does not say how long the updates have waited: $(cat "$log")"
+  grep -F 'are not reaching you' "$log" >/dev/null \
+    || fail "the active alert does not state the outcome: $(cat "$log")"
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
@@ -2503,7 +2693,7 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker unexpectedly persisted in an unwritable state directory"
   alerts=$(grep -c 'osascript' "$log" 2>/dev/null || true)
   [ "$alerts" -eq 1 ] || fail "unwritable marker emitted $alerts active alerts instead of one"
-  errors=$(grep -c 'ERROR: away-mode escalation undelivered' "$daemon_log" 2>/dev/null || true)
+  errors=$(grep -c 'ERROR: 1 away update(s) have not reached this session' "$daemon_log" 2>/dev/null || true)
   [ "$errors" -eq 1 ] || fail "unwritable marker logged $errors wedge errors instead of one"
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }
@@ -2883,13 +3073,21 @@ test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
 test_wedge_alarm_off_disables_active_alert_regardless_of_position
 test_wedge_alarm_auto_darwin_selects_osascript
-test_wedge_alarm_auto_non_darwin_has_no_os_channel
+test_wedge_alarm_auto_linux_selects_notify_send
+test_wedge_alarm_auto_without_a_platform_channel_reports_unreached
+test_wedge_alarm_off_reports_disabled_not_unreached
+test_wedge_alarm_every_channel_failing_reports_unreached
 test_wedge_alarm_config_file_multi_channel
 test_wedge_alarm_failing_channel_degrades_gracefully
 test_wedge_alarm_hung_channel_times_out_and_falls_through
 test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
+test_undeliverable_away_window_hands_the_updates_to_the_wake_queue
+test_undeliverable_away_window_does_not_escape_before_the_bound
+test_undeliverable_away_window_escapes_once_not_once_per_window
+test_reachable_alert_never_escapes_to_the_wake_queue
+test_wedge_marker_states_the_outcome_and_the_reason
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_reports_delivered_unconfirmed_submit
