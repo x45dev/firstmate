@@ -39,6 +39,27 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  # A real tmux answers its window inventory from the same panes display-message
+  # resolves, so the fake serves the windows the fixture actually recorded.
+  # Answering empty here would instead model a server that denies every window
+  # it just resolved a pane for, which reads as an authoritatively absent
+  # endpoint (bin/backends/tmux.sh, fm_backend_tmux_agent_state).
+  list-windows)
+    sess=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) sess=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    for meta in "${FM_HOME:-/nonexistent}"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      win=$(sed -n 's/^window=//p' "$meta" | head -1)
+      case "$win" in
+        "$sess":*) printf '%s\n' "${win#*:}" ;;
+      esac
+    done
+    ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;
