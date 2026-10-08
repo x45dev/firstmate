@@ -1042,6 +1042,7 @@ ok - an away window whose updates and alert both reach nobody hands them to the 
 ok - the escape waits for its bound; the ordinary alarm still runs below it
 ok - a long undeliverable window queues exactly one row, however many windows pass
 ok - a host whose alert channel reaches the owner never escapes to the wake queue
+ok - a delivered alert resets the unreached count; only consecutive unreached windows reach the bound
 ok - the durable away-delivery record states the outcome, the cost and the reason in plain language
 ok - fm_composer_verdict_reason: every verdict has a plain-language reason and an unknown one degrades safely
 ```
@@ -1059,7 +1060,7 @@ Proven against stubbed panes and stub channels only, by `tests/fm-daemon.test.sh
 - Delivery that keeps failing raises the alarm and preserves the buffered updates, on an unreadable input box and on one holding unsent text.
 - A hung or failing alert channel is bounded and falls through to the next one.
 - The durable record states the outcome, how much is waiting, and why delivery failed, in plain language.
-- The escape arms only after the configured number of windows whose alert reached nobody, fires once per episode however long the stall lasts, and never fires when the alert was turned off or when a channel reached someone.
+- The escape arms only after the configured number of windows whose alert reached nobody, fires once per episode however long the stall lasts, and never fires when the alert was turned off or when a channel reached someone, and a delivered alert in between restarts the count.
 
 Unconfirmed live, and what each would take:
 
