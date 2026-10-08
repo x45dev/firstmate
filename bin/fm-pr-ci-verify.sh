@@ -42,8 +42,17 @@
 # a push and by workflow_dispatch alone is dropped rather than demanded, because
 # demanding it names suites that are unreachable rather than not-yet-run, and a
 # refusal a reader cannot act on is a refusal that teaches them to route around
-# this command. Every dropped candidate is printed with its reason, so the
-# verdict shows what was set aside as well as what was required.
+# this command. The roster inside the gate is held to the same standard one
+# level down: a job the gating workflow expands on a push but never on a pull
+# request is set aside too. Every dropped candidate and every set-aside suite is
+# printed with its reason, so the verdict shows what was not required as well as
+# what was.
+#
+# A check that reported more than once on the commit is counted on its latest
+# report only, so a pull request whose check has since passed is not refused on
+# the record of the attempt it replaced. A later run of the same workflow under
+# a DIFFERENT event does not replace an earlier one, because the two validated
+# different trees; bin/fm-ci-checks-lib.sh owns that rule.
 #
 # Usage: fm-pr-ci-verify.sh <pr-url>
 # Env:   FM_CI_GATING_WORKFLOWS  JSON array of workflow names to be the
@@ -129,7 +138,21 @@ fi
 ROSTER=$FM_CI_ROSTER
 WORKFLOWS=$FM_CI_WORKFLOWS
 
-state=$(fm_ci_checks_state "$rollup" "$ROSTER" "$WORKFLOWS") || unreadable "the checks on $URL"
+# Which of the base repository's runs at this commit a later run of the same
+# workflow and event replaced, so a check that has since reported again is not
+# counted on its earlier result. bin/fm-ci-checks-lib.sh owns the rule; a
+# commit whose runs cannot be read yields none known, which leaves every check
+# counted and so can only refuse rather than grant.
+SUPERSEDED='[]'
+if [ -n "$head_sha" ]; then
+  base_runs=$(gh api "repos/$BASE_REPO/actions/runs?head_sha=$head_sha&per_page=100" \
+    --jq '[.workflow_runs[] | {id, workflow_id, name, status, conclusion, event}]' 2>/dev/null) \
+    || base_runs=''
+  [ -z "$base_runs" ] || SUPERSEDED=$(fm_ci_superseded_runs "$base_runs")
+fi
+
+state=$(fm_ci_checks_state "$rollup" "$ROSTER" "$WORKFLOWS" "$SUPERSEDED") \
+  || unreadable "the checks on $URL"
 
 # The roster is printed for every outcome, including the passing one, so the
 # evidence behind a green verdict is on the record rather than only its verdict.
@@ -142,19 +165,32 @@ printf 'gating workflows: %s, from %s\n' \
   || printf 'not gating: %s\n' "$FM_CI_WORKFLOWS_EXCLUDED"
 printf 'required suites: %s, from %s\n' \
   "$(printf '%s' "$ROSTER" | jq -r 'length')" "$FM_CI_ROSTER_SOURCE"
+# What the target branch validates on a push that its own pull requests do not,
+# so a reader can tell a roster that weighed a push-only suite and set it aside
+# from one that never saw it.
+[ -z "$FM_CI_ROSTER_EXCLUDED" ] \
+  || printf 'not required: %s\n' "$FM_CI_ROSTER_EXCLUDED"
+# A check a later report replaced is printed too, marked as replaced, so the
+# evidence shows that a red record was seen and set aside rather than missed.
 roster=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" \
-  --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
-  def row: "  " + (if fm_ci_repo_owned then "suite " else "other " end)
+  --argjson fm_ci_workflows "$WORKFLOWS" --argjson fm_ci_superseded "$SUPERSEDED" \
+  "$FM_CI_CHECKS_JQ_DEFS"'
+  def row($tag): "  " + (if fm_ci_repo_owned then "suite " else "other " end)
     + ((.conclusion // .state // "pending") | tostring)
     + "\t" + (((.workflowName // "") | tostring) as $w | if $w == "" then "-" else $w end)
-    + " / " + ((.name // .context // "-") | tostring);
-  [.[] | select(fm_ci_repo_owned) | row] + [.[] | select(fm_ci_repo_owned | not) | row]
+    + " / " + ((.name // .context // "-") | tostring) + $tag;
+  (fm_ci_live_checks) as $live
+  | (fm_ci_replaced_checks) as $old
+  | [$live[] | select(fm_ci_repo_owned) | row("")]
+    + [$live[] | select(fm_ci_repo_owned | not) | row("")]
+    + [$old[] | row(" (replaced by a later report)")]
   | .[]' 2>/dev/null) || roster=''
 [ -z "$roster" ] || printf '%s\n' "$roster"
 
 own=$(printf '%s' "$rollup" | jq --argjson fm_ci_roster "$ROSTER" \
-  --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
-  [.[] | select(fm_ci_repo_owned)] | length' 2>/dev/null) || own='?'
+  --argjson fm_ci_workflows "$WORKFLOWS" --argjson fm_ci_superseded "$SUPERSEDED" \
+  "$FM_CI_CHECKS_JQ_DEFS"'
+  [fm_ci_live_checks[] | select(fm_ci_repo_owned)] | length' 2>/dev/null) || own='?'
 printf '%s checks: %s (%s repository-owned)\n' "$BASE_REPO" "$state" "$own"
 
 # An incomplete roster names what it is missing, the same way a red or
@@ -162,7 +198,7 @@ printf '%s checks: %s (%s repository-owned)\n' "$BASE_REPO" "$state" "$own"
 # passing" with no way to tell what would make it so.
 if [ "$state" = incomplete ]; then
   missing=$(printf '%s' "$rollup" | jq -r --argjson fm_ci_roster "$ROSTER" \
-    --argjson fm_ci_workflows "$WORKFLOWS" \
+    --argjson fm_ci_workflows "$WORKFLOWS" --argjson fm_ci_superseded "$SUPERSEDED" \
     "$FM_CI_CHECKS_JQ_DEFS"'fm_ci_missing_suites | .[]' 2>/dev/null) || missing=''
   [ -z "$missing" ] || printf 'missing required suites:\n%s\n' "$(printf '%s\n' "$missing" | sed 's/^/  /')"
 fi
@@ -213,7 +249,8 @@ runs=$(gh api "repos/$head_repo/actions/runs?head_sha=$head_sha&per_page=100" \
 # roster the rollup shape uses. bin/fm-ci-checks-lib.sh owns why a successful
 # run is not that evidence.
 ci_run_ids=$(printf '%s' "$runs" | jq -r --argjson fm_ci_roster "$ROSTER" \
-  --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
+  --argjson fm_ci_workflows "$WORKFLOWS" --argjson fm_ci_superseded '[]' \
+  "$FM_CI_CHECKS_JQ_DEFS"'
   .[] | select(fm_ci_run_from_ci_workflow) | (.id // empty) | tostring' 2>/dev/null) \
   || unreadable "the workflow runs in $head_repo"
 
@@ -246,7 +283,8 @@ printf '%s runs: %s\n' "$head_repo" "$fork_state"
 
 if [ "$fork_state" = incomplete ]; then
   fork_missing=$(printf '%s' "$ci_jobs" | jq -r --argjson fm_ci_roster "$ROSTER" \
-    --argjson fm_ci_workflows "$WORKFLOWS" "$FM_CI_CHECKS_JQ_DEFS"'
+    --argjson fm_ci_workflows "$WORKFLOWS" --argjson fm_ci_superseded '[]' \
+    "$FM_CI_CHECKS_JQ_DEFS"'
     fm_ci_jobs_missing_suites | .[]' 2>/dev/null) || fork_missing=''
   if [ -n "$fork_missing" ]; then
     printf 'missing required suites:\n%s\n' "$(printf '%s\n' "$fork_missing" | sed 's/^/  /')"

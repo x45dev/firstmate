@@ -232,19 +232,55 @@
 # actually validated anything, so a CI run that completed with one of its
 # jobs in that state is a partially-skipped workflow, not a clean pass.
 
+# One commit can carry more than one check run under a single name, because
+# GitHub leaves the earlier record on the commit when the same check reports
+# again: re-running a failed job adds a second check run beside the first, and
+# a second event on an unchanged head - a pull request edited after its body
+# was rejected - produces a whole second run of the workflow. The roster is
+# keyed by check name and cannot tell the two records apart, so whichever one
+# is counted becomes the answer for that name, and counting the older one
+# reports a commit red that is green now. Measured on x45dev/firstmate pull
+# request 15 at head e881404b: "PR must be raised via no-mistakes" is there
+# twice, a FAILURE from run 34744411381 and a SUCCESS from run 34747263358
+# fired by the `edited` event seventy minutes later, and reading both calls the
+# head failing.
+#
+# Two separate rules drop a replaced record, and both demand positive evidence
+# that one record came after another rather than inferring it from the order
+# the reply arrives in:
+#
+#   Within one workflow run, two check runs of one name are two attempts at one
+#   job, and the newest by startedAt is that job's result.
+#   Across runs, a run is replaced only when a LATER run of the same workflow
+#   AND the same triggering event exists at this commit, which is what
+#   fm_ci_superseded_runs computes from the run ids. The event is half of that
+#   test and not a detail: a repository that runs its gate on both push and
+#   pull_request validates two different trees at one commit - the branch tip
+#   and the merge result - so neither of those runs replaces the other, and
+#   collapsing them would hide a red branch behind a green merge.
+#
+# $fm_ci_superseded is the only input to this file whose empty value is not a
+# refusal. An unestablished gate or roster costs a verdict, because without
+# them nothing can be judged; an unknown supersession costs nothing but leaves
+# the older record counted, which is this file's existing behaviour and the
+# safe direction. A caller that cannot afford the extra read of a commit's runs
+# binds it empty and is no more permissive than before.
+
 # jq function definitions. Prepend to a jq program; the program then calls
 # fm_ci_state on an array of statusCheckRollup entries.
 #
 # Every program built on these defs must bind BOTH halves of the standard
 # fm_ci_roster resolves for the repository under test, with --argjson:
 # $fm_ci_workflows, the names of the workflows whose runs are that repository's
-# gate, and $fm_ci_roster, the required suite roster inside them. jq refuses to
-# compile a program whose variables are not bound, so a caller that forgets one
-# cannot silently classify against an absent standard - it gets no verdict at
-# all. The shell wrappers at the bottom of this file take both as arguments and
-# do that binding for you.
-# $all, $own, $fm_ci_workflows and $fm_ci_roster are jq variables, deliberately
-# not shell expansions.
+# gate, and $fm_ci_roster, the required suite roster inside them. It must also
+# bind $fm_ci_superseded, the run ids fm_ci_superseded_runs found replaced at
+# this commit, as an empty array where the caller did not establish them. jq
+# refuses to compile a program whose variables are not bound, so a caller that
+# forgets one cannot silently classify against an absent standard - it gets no
+# verdict at all. The shell wrappers at the bottom of this file take all three
+# as arguments and do that binding for you.
+# $all, $own, $fm_ci_workflows, $fm_ci_roster and $fm_ci_superseded are jq
+# variables, deliberately not shell expansions.
 # shellcheck disable=SC2016
 FM_CI_CHECKS_JQ_DEFS='
 def fm_ci_workflow_names: $fm_ci_workflows;
@@ -262,8 +298,53 @@ def fm_ci_check_red:
 def fm_ci_check_unfinished:
   (((.status // "") | tostring | ascii_upcase) != "COMPLETED")
   and (((.state // "") | tostring | ascii_upcase) != "SUCCESS");
-def fm_ci_missing_suites:
+# The workflow run a check run came out of, taken from the details URL GitHub
+# puts on it, which is the only place the rollup shape records it. null for a
+# legacy commit status and for anything whose URL is not that shape, which
+# keeps such an entry out of every supersession test rather than grouping all
+# of them together under one null run.
+def fm_ci_check_run_id:
+  ((.detailsUrl // "") | tostring) as $u
+  | if ($u | test("/actions/runs/[0-9]+/"))
+    then ($u | capture("/actions/runs/(?<id>[0-9]+)/") | .id | tonumber)
+    else null end;
+# Drop the checks of every run $fm_ci_superseded names as replaced. A caller
+# that did not establish that binds it empty, which drops nothing.
+def fm_ci_present_runs:
+  [ (. // [])[]
+    | select(fm_ci_check_run_id as $r
+             | $r == null or (($fm_ci_superseded // []) | index($r)) == null) ];
+# Collapse the attempts of one job inside one run to the newest. The group is
+# keyed by the run as well as the name, so two runs of one workflow are never
+# collapsed into each other - fm_ci_superseded_runs owns that question, and it
+# needs the triggering event this shape does not carry. A group whose entries
+# do not all carry a startedAt, or whose newest startedAt is shared, is left
+# whole: with no evidence of which attempt came last, none of them is replaced.
+def fm_ci_latest_attempts:
   (. // []) as $all
+  | [$all[] | select(fm_ci_check_run_id == null)]
+  + [ [$all[] | select(fm_ci_check_run_id != null)]
+      | group_by([((.__typename // "") | tostring),
+                  ((.workflowName // "") | tostring),
+                  ((.name // .context // "") | tostring),
+                  (fm_ci_check_run_id | tostring)])[]
+    | length as $n
+    | [.[] | ((.startedAt // "") | tostring) | select(. != "")] as $at
+    | if $n < 2 or ($at | length) != $n then .[]
+      else ($at | max) as $newest
+        | [.[] | select(((.startedAt // "") | tostring) == $newest)] as $last
+        | if ($last | length) == 1 then $last[0] else .[] end
+      end ];
+# The rollup as it stands now: every record a later one of the same check
+# replaced is gone, and what is left is one result per check. Every judgement
+# in this file reads the rollup through this.
+def fm_ci_live_checks: (. // []) | fm_ci_present_runs | fm_ci_latest_attempts;
+# The records those two rules dropped, so a reader can see that a red check was
+# considered and set aside rather than never noticed.
+def fm_ci_replaced_checks: (. // []) as $all | $all - ($all | fm_ci_live_checks);
+def fm_ci_missing_suites:
+  (. // []) as $raw
+  | ($raw | fm_ci_live_checks) as $all
   | ([$all[] | select(fm_ci_from_ci_workflow) | ((.name // .context // "") | tostring)] | unique) as $ci_names
   | fm_ci_required_suites - $ci_names;
 # An empty roster is "the roster could not be established", never "nothing is
@@ -280,9 +361,10 @@ def fm_ci_no_roster: (fm_ci_required_suites | length) == 0;
 # already lands, and which no caller may read as evidence.
 def fm_ci_no_gate: (fm_ci_workflow_names | length) == 0;
 def fm_ci_state:
-  (. // []) as $all
+  (. // []) as $raw
+  | ($raw | fm_ci_live_checks) as $all
   | [$all[] | select(fm_ci_from_ci_workflow)] as $ci
-  | if ($all | length) == 0 then "none"
+  | if ($raw | length) == 0 then "none"
     elif fm_ci_no_gate then "incomplete"
     elif ($ci | length) == 0 then "no-repo-ci"
     elif any($all[]; fm_ci_check_red) then "failing"
@@ -483,12 +565,16 @@ pull_request_target
 # the observed candidates dropped because no pull request can produce them,
 # each with the reason. Empty when nothing was dropped. A reader who cannot see
 # that a deploy was considered and set aside cannot tell this gate from one that
-# never noticed the deploy at all.
+# never noticed the deploy at all. FM_CI_ROSTER_EXCLUDED is the same record one
+# level down: the job names a gating workflow produces on a push to the target
+# branch that its own pull-request runs do not, each with the run that showed
+# it, so a short roster says which suites it set aside and on what evidence.
 FM_CI_WORKFLOWS=''
 FM_CI_WORKFLOWS_SOURCE=''
 FM_CI_WORKFLOWS_EXCLUDED=''
 FM_CI_ROSTER=''
 FM_CI_ROSTER_SOURCE=''
+FM_CI_ROSTER_EXCLUDED=''
 
 # fm_ci_roster <repo> [<branch>]: resolve what <repo> requires of a pull request
 # into FM_CI_WORKFLOWS, a JSON array of gating workflow names, and FM_CI_ROSTER,
@@ -516,7 +602,8 @@ FM_CI_ROSTER_SOURCE=''
 # Two overrides name a standard outright instead, for the cases this resolution
 # cannot serve. FM_CI_REQUIRED_SUITES is a JSON array of job names, for a change
 # that deliberately adds or removes a CI job, whose branch is therefore judged
-# against a roster the target branch has not recorded yet.
+# against a roster the target branch has not recorded yet. It replaces the whole
+# roster resolution, the narrowing included.
 # FM_CI_GATING_WORKFLOWS is a JSON array of workflow names, for a repository
 # whose gate this resolution still gets wrong - a workflow whose pull_request
 # trigger is filtered away from this branch, or one the branch validates under a
@@ -530,16 +617,38 @@ FM_CI_ROSTER_SOURCE=''
 # established, naming the reason on stderr. Every caller must treat that as a
 # refusal: this function never returns an empty array, because a caller cannot
 # tell one apart from a repository that requires nothing.
+
+# fm_ci_run_job_names <repo> <run-id>: the unique job display names of one run,
+# as a JSON array, or nothing and 1 when that cannot be read in full. A reply
+# whose job count runs past one page is a name list with names missing from it,
+# so it is refused here rather than returned short - a caller using it to
+# require suites would understate what is required, and a caller using it to
+# drop suites would drop ones that are genuinely reachable. Silent, because
+# each caller owns what an unreadable run means for it.
+fm_ci_run_job_names() {
+  local repo=$1 run_id=$2 reply total names
+  reply=$(fm_ci_gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) || return 1
+  total=$(printf '%s' "$reply" | jq -r '.total_count // empty' 2>/dev/null) || return 1
+  case "$total" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$total" -le 100 ] || return 1
+  names=$(printf '%s' "$reply" | jq -c '
+    [.jobs[]? | (.name // "") | select(type == "string" and . != "")] | unique' 2>/dev/null) || return 1
+  [ -n "$names" ] && [ "$names" != '[]' ] || return 1
+  printf '%s\n' "$names"
+}
+
 fm_ci_roster() {
   local repo=$1 branch=${2:-}
   local gate_override='' roster_override='' runs gate observed missing
   local names names_source roster roster_source excluded owned
-  local name path wstate run_id file run_jobs total jobs rc
+  local name path wstate run_id wid file run_jobs total jobs rc
+  local pr_runs='[]' pr_run pr_jobs pr_union pr_seen keep drop roster_excluded=''
   FM_CI_WORKFLOWS=''
   FM_CI_WORKFLOWS_SOURCE=''
   FM_CI_WORKFLOWS_EXCLUDED=''
   FM_CI_ROSTER=''
   FM_CI_ROSTER_SOURCE=''
+  FM_CI_ROSTER_EXCLUDED=''
 
   if [ -n "${FM_CI_GATING_WORKFLOWS:-}" ]; then
     gate_override=$(printf '%s' "$FM_CI_GATING_WORKFLOWS" | jq -c '
@@ -622,7 +731,7 @@ fm_ci_roster() {
     | map((max_by(.id)) as $newest
           | ([$owned[] | select(.id == $newest.wid)] | first) as $w
           | {name: ($w.name // $newest.name), path: ($w.path // ""),
-             state: ($w.state // "removed"), run: $newest.id})
+             state: ($w.state // "removed"), run: $newest.id, wid: $newest.wid})
     | map(select(.name != "")) | sort_by(.name)' 2>/dev/null) || observed=''
   [ -n "$observed" ] || observed='[]'
 
@@ -632,7 +741,9 @@ fm_ci_roster() {
     names=$gate_override
     names_source="the FM_CI_GATING_WORKFLOWS override"
     gate=$(jq -cn --argjson observed "$observed" --argjson want "$gate_override" '
-      [$want[] | . as $n | {name: $n, run: ([$observed[] | select(.name == $n) | .run] | max)}]' \
+      [$want[] | . as $n
+       | ([$observed[] | select(.name == $n)] | max_by(.run)) as $o
+       | {name: $n, run: ($o.run // null), wid: ($o.wid // null)}]' \
       2>/dev/null) || gate='[]'
   else
     if [ "$observed" = '[]' ]; then
@@ -642,7 +753,7 @@ fm_ci_roster() {
     fi
     gate='[]'
     excluded=''
-    while IFS='	' read -r name wstate path run_id; do
+    while IFS='	' read -r name wstate path run_id wid; do
       [ -n "$name" ] || continue
       if [ "$wstate" != active ]; then
         # Deleted from the repository, or disabled in it. Either way no pull
@@ -670,7 +781,7 @@ fm_ci_roster() {
       case "$rc" in
         0)
           gate=$(jq -cn --argjson g "$gate" --arg n "$name" --argjson r "$run_id" \
-            '$g + [{name: $n, run: $r}]' 2>/dev/null) || gate=''
+            --argjson w "$wid" '$g + [{name: $n, run: $r, wid: $w}]' 2>/dev/null) || gate=''
           [ -n "$gate" ] || {
             printf 'error: could not assemble the gating workflows of %s on %s\n' "$repo" "$branch" >&2
             return 1
@@ -684,7 +795,7 @@ fm_ci_roster() {
           ;;
       esac
     done <<EOF
-$(printf '%s' "$observed" | jq -r '.[] | [.name, .state, .path, (.run | tostring)] | @tsv' 2>/dev/null)
+$(printf '%s' "$observed" | jq -r '.[] | [.name, .state, .path, (.run | tostring), (.wid | tostring)] | @tsv' 2>/dev/null)
 EOF
 
     if [ "$gate" = '[]' ]; then
@@ -721,9 +832,62 @@ EOF
     return 1
   }
 
+  # The second observation the roster needs, and the defect it closes. A push
+  # run's jobs are not a pull request's jobs: a gating workflow can expand a
+  # different job graph under a different event, and x45dev/qrarca's does -
+  # its matrix is `${{ github.event_name == 'pull_request' && fromJSON(...two
+  # platforms...) || fromJSON(...three...) }}`, so the newest successful push
+  # run on main carries "build & test (macos-latest)" and no pull-request run
+  # of that workflow has ever expanded that leg. Requiring it of a pull request
+  # there names a suite that is unreachable rather than not-yet-run, which is
+  # the same refusal the trigger test above removed one level up, arriving one
+  # level down.
+  #
+  # So each gating workflow's recent successful pull_request runs are read
+  # too, and the roster taken from the push run is narrowed to the names that
+  # at least one of them also produced. Narrowing rather than replacing is what
+  # keeps the roster anchored to the target branch: every name still comes from
+  # what the branch itself validated on a push, and the pull-request
+  # observation only says which of those names a pull request has been seen to
+  # produce.
+  #
+  # The narrowing is a union across runs, never one run's say. A single run is
+  # a poor witness of what a pull request can produce: a path-filtered or
+  # docs-only pull request expands fewer jobs, and if it happened to be the
+  # newest it would drop every suite it did not expand, so a later pull request
+  # that silently failed to produce one of them would read as passing. A name
+  # is therefore dropped only when none of the newest five successful
+  # pull-request runs of its workflow, all taken from the one 100-run window
+  # below, ever produced it. That bound is what one more job read per run costs,
+  # and it errs toward keeping a suite: a name produced only by a pull request
+  # older than those five is demanded, which costs a verdict and cannot grant
+  # one.
+  #
+  # No readable pull-request observation means no narrowing, and so today's
+  # roster. That is also the whole fallback for a gate that runs on
+  # pull_request_target, which the single event-filtered query below does not
+  # see. A run whose jobs cannot be read in full is skipped, since a short job
+  # list would drop names that are genuinely required. A union that shares no
+  # name at all with the push run is discarded for the same reason, since it
+  # describes a job graph too different to narrow by.
+  #
+  # The query cannot be restricted to the target branch: `branch` matches a
+  # run's head branch, and a pull_request run's head branch is the branch under
+  # test, never the branch it targets. What is read is therefore the workflow's
+  # pull-request behaviour across the repository rather than on one base branch.
+  if [ -z "$roster_override" ]; then
+    pr_runs=$(fm_ci_gh api \
+      "repos/$repo/actions/runs?status=success&event=pull_request&per_page=100" 2>/dev/null \
+      | jq -c '[.workflow_runs[]? | {wid: .workflow_id, id: .id}
+               | select((.wid | type) == "number" and (.id | type) == "number")]
+              | group_by(.wid)
+              | map({wid: .[0].wid, ids: ([.[].id] | sort | reverse | .[:5])})' 2>/dev/null) || pr_runs=''
+    [ -n "$pr_runs" ] || pr_runs='[]'
+  fi
+
   roster='[]'
   roster_source=''
-  while IFS='	' read -r name run_id; do
+  while IFS='	' read -r name run_id wid; do
     [ -n "$run_id" ] || continue
     run_jobs=$(fm_ci_gh api "repos/$repo/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) \
       || run_jobs=''
@@ -749,15 +913,40 @@ EOF
       printf 'error: %s run %s in %s named no jobs to require\n' "$name" "$run_id" "$repo" >&2
       return 1
     }
+    roster_source="${roster_source:+$roster_source, }$name run $run_id"
+
+    # Narrow this workflow's contribution to the names some recent pull request
+    # of it has been seen to produce, when there is such a run and it is
+    # comparable.
+    pr_union='[]'
+    pr_seen=''
+    for pr_run in $(jq -r --argjson w "${wid:-null}" \
+      '.[] | select($w != null and .wid == $w) | .ids[]' <<<"$pr_runs" 2>/dev/null); do
+      pr_jobs=$(fm_ci_run_job_names "$repo" "$pr_run") || continue
+      pr_union=$(jq -cn --argjson a "$pr_union" --argjson b "$pr_jobs" '($a + $b) | unique' 2>/dev/null) \
+        || continue
+      pr_seen="${pr_seen:+$pr_seen, }$pr_run"
+    done
+    if [ -n "$pr_seen" ]; then
+      keep=$(jq -cn --argjson a "$jobs" --argjson b "$pr_union" \
+        '[$a[] | select(. as $n | $b | index($n))]' 2>/dev/null) || keep=''
+      if [ -n "$keep" ] && [ "$keep" != '[]' ]; then
+        drop=$(jq -rn --argjson a "$jobs" --argjson k "$keep" \
+          '[$a[] | select(. as $n | ($k | index($n)) == null)] | join(", ")' 2>/dev/null) || drop=''
+        jobs=$keep
+        roster_source="$roster_source narrowed to its pull-request runs $pr_seen"
+        [ -z "$drop" ] || roster_excluded="${roster_excluded:+$roster_excluded; }$drop (not produced by $name pull-request runs $pr_seen)"
+      fi
+    fi
+
     roster=$(jq -cn --argjson a "$roster" --argjson b "$jobs" '($a + $b) | unique' 2>/dev/null) \
       || roster=''
     [ -n "$roster" ] || {
       printf 'error: could not assemble the required suite roster of %s on %s\n' "$repo" "$branch" >&2
       return 1
     }
-    roster_source="${roster_source:+$roster_source, }$name run $run_id"
   done <<EOF
-$(printf '%s' "$gate" | jq -r '.[] | select(.run != null) | "\(.name)\t\(.run)"' 2>/dev/null)
+$(printf '%s' "$gate" | jq -r '.[] | select(.run != null) | "\(.name)\t\(.run)\t\(.wid // "")"' 2>/dev/null)
 EOF
 
   [ "$roster" != '[]' ] && [ -n "$roster_source" ] || {
@@ -773,16 +962,65 @@ EOF
   FM_CI_ROSTER=$roster
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_CI_ROSTER_SOURCE="$repo $roster_source on $branch"
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_CI_ROSTER_EXCLUDED=$roster_excluded
 }
 
 
-# fm_ci_checks_state <rollup-json> <roster-json> <workflows-json>: print the
-# state of one statusCheckRollup array against the standard fm_ci_roster
-# resolved - the gating workflow names and the required suite roster inside
-# them. Unreadable input - any payload - is refused rather than classified, so a
-# malformed or truncated payload can never be reported as passing.
+# fm_ci_superseded_runs <workflow-runs-json>: print the ids of the runs in that
+# array that a LATER run of the same workflow and the same triggering event
+# replaced at this commit, as a JSON array. The input is the REST workflow-runs
+# shape read at one head commit, and it needs id, workflow_id and event on each
+# entry.
+#
+# The workflow is taken from workflow_id and never from the run's name, for a
+# reason this repository's own gate demonstrates: `name` in that shape is the
+# run's display name, which a workflow setting run-name writes per run, so two
+# runs of one workflow arrive as "PR #15 body compliance - synchronize - event
+# 22" and "... - edited - event 23" and no name comparison groups them.
+# workflow_id is the identity that holds across a rename as well, which is why
+# fm_ci_roster groups its candidates by it too.
+#
+# The event is half of the identity on purpose. A repository that gates on both
+# push and pull_request produces two runs of one workflow at one commit, and
+# those validate different trees - the branch tip and the merge result - so
+# neither replaces the other. Two runs of one workflow under one event at one
+# commit are the same check fired twice, which is what a pull request edited
+# after its body was rejected does, and only the later one is its result.
+#
+# Ordering is by run id, which GitHub issues in increasing order, so this needs
+# no timestamp and cannot be defeated by a missing one. An entry without a
+# usable id, workflow_id or event is left out of every group rather than
+# grouped under a blank: nothing is declared replaced without an identity to
+# compare.
+# Prints [] for an unreadable payload, which is the answer that changes no
+# verdict, because an unknown supersession must cost nothing rather than grant
+# a pass.
+fm_ci_superseded_runs() {
+  local out
+  out=$(printf '%s' "$1" | jq -c '
+    if type == "array" then
+      [ .[] | select((.id | type) == "number"
+                     and (.workflow_id | type) == "number"
+                     and ((.event // "") | tostring) != "") ]
+      | group_by([(.workflow_id | tostring), ((.event) | tostring)])
+      | map((max_by(.id) | .id) as $newest | [.[] | select(.id != $newest) | .id])
+      | flatten | unique
+    else error("payload is not an array") end' 2>/dev/null) || out=''
+  [ -n "$out" ] || out='[]'
+  printf '%s\n' "$out"
+}
+
+# fm_ci_checks_state <rollup-json> <roster-json> <workflows-json>
+# [<superseded-run-ids-json>]: print the state of one statusCheckRollup array
+# against the standard fm_ci_roster resolved - the gating workflow names and the
+# required suite roster inside them - with every check a later one of the same
+# check replaced left out. The fourth argument is what fm_ci_superseded_runs
+# returned for this commit, and defaults to none known. Unreadable input - any
+# payload - is refused rather than classified, so a malformed or truncated
+# payload can never be reported as passing.
 fm_ci_checks_state() {
-  fm_ci_classify "$1" fm_ci_state "$2" "$3"
+  fm_ci_classify "$1" fm_ci_state "$2" "$3" "${4:-[]}"
 }
 
 # fm_ci_runs_state <workflow-runs-json> <workflows-json>: print the run-level state of one
@@ -796,7 +1034,7 @@ fm_ci_checks_state() {
 # state of its own when the gating workflows could not be established, which is
 # a refusal like every other answer of its that is not passing.
 fm_ci_runs_state() {
-  fm_ci_classify "$1" fm_ci_runs_state '[]' "$2"
+  fm_ci_classify "$1" fm_ci_runs_state '[]' "$2" '[]'
 }
 
 # fm_ci_run_jobs_state <workflow-runs-json> <ci-jobs-json> <roster-json>
@@ -810,7 +1048,7 @@ fm_ci_runs_state() {
 fm_ci_run_jobs_state() {
   local runs=$1 jobs=$2 roster=$3 workflows=$4 state
   state=$(jq -rn --argjson runs "$runs" --argjson jobs "$jobs" --argjson fm_ci_roster "$roster" \
-    --argjson fm_ci_workflows "$workflows" \
+    --argjson fm_ci_workflows "$workflows" --argjson fm_ci_superseded '[]' \
     "$FM_CI_CHECKS_JQ_DEFS"'
     if ($runs | type) == "array" and ($jobs | type) == "array"
       and ($fm_ci_roster | type) == "array" and ($fm_ci_workflows | type) == "array"
@@ -821,9 +1059,10 @@ fm_ci_run_jobs_state() {
 }
 
 fm_ci_classify() {
-  local payload=$1 fn=$2 roster=$3 workflows=$4 state
+  local payload=$1 fn=$2 roster=$3 workflows=$4 superseded=${5:-[]} state
   state=$(printf '%s' "$payload" | jq -r --argjson fm_ci_roster "$roster" \
-    --argjson fm_ci_workflows "$workflows" "$FM_CI_CHECKS_JQ_DEFS"'
+    --argjson fm_ci_workflows "$workflows" --argjson fm_ci_superseded "$superseded" \
+    "$FM_CI_CHECKS_JQ_DEFS"'
     if type == "array" and ($fm_ci_roster | type) == "array" and ($fm_ci_workflows | type) == "array"
     then '"$fn"' else error("payload is not an array") end' 2>/dev/null) || return 1
   [ -n "$state" ] || return 1
