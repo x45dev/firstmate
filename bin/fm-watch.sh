@@ -220,12 +220,11 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
-# transitively above) is the single owner of the max(300, poll+60)
-# derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
+# A healthy cycle's beacon can legitimately age up to POLL seconds between
+# touches; watcher_beat below owns where in the cycle it is touched and why.
+# fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced transitively
+# above) is the single owner of the max(300, poll+60) derivation - see
+# docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
@@ -1798,6 +1797,74 @@ fm_active_check_stop() {
   FM_ACTIVE_CHECK_PGID=
 }
 
+# watcher_beat: refresh the liveness beacon that fm-guard.sh and the auto-arm read.
+#
+# The grace every beacon reader derives (fm_poll_derived_grace) is sized for a
+# beacon that ages at most one poll cadence between touches, so the beacon has
+# to be refreshed after each COMPLETED unit of bounded work in the cycle, not
+# once per cycle: a cycle's body is serial and unbounded in aggregate - a
+# registered check may burn CHECK_TIMEOUT, the signal scan lingers
+# SIGNAL_GRACE, and every live window is captured in turn - so beating only at
+# the top lets a working watcher read as dead and invites a forced repair of it.
+# Beating only AFTER a unit of work returns is what preserves wedge detection:
+# a watcher blocked inside any one of those operations still stops beating, so
+# the beacon's age bounds the longest single bounded operation plus the poll
+# cadence, which is exactly what the derived grace assumes. Never beat before
+# or during a blocking call - that would mask the wedge the beacon exists to
+# expose.
+#
+# Because the beacon now moves several times inside one cycle, its mtime alone
+# no longer marks a cycle boundary, and that boundary is what an observer
+# waiting for "one full cycle has run" needs. The opening beat of each cycle
+# therefore writes that cycle's serial into the file while every later beat
+# only touches it, so the mtime answers liveness and the content answers
+# progress from one file. Every liveness reader (bin/fm-wake-lib.sh,
+# bin/fm-supervision-lib.sh, bin/fm-watch-arm.sh, and this script's own
+# pre-acquisition refusal) reads the mtime and never the content. The serial
+# restarts at 1 with the process, so it identifies a boundary within one
+# watcher's life and never across a restart.
+WATCHER_CYCLE=0
+watcher_beat() {
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$1" > "$STATE/.last-watcher-beat"
+  else
+    touch "$STATE/.last-watcher-beat"
+  fi
+}
+
+# beating_sleep <seconds>: a deliberate in-body wait that keeps beating.
+#
+# The one wait inside the cycle that is neither a bounded probe nor the terminal
+# wait is the signal-coalescing linger, and SIGNAL_GRACE is operator-configured
+# independently of the grace. Sleeping it in POLL-sized slices keeps the beacon
+# bounded by the poll cadence whatever that linger is set to, rather than
+# leaving the same starvation one configuration change away. This waits on the
+# clock alone, so it cannot mask a wedge: there is no work here to block on.
+beating_sleep() {
+  local remaining=$1 slice
+  # A fractional or otherwise non-integer wait cannot be sliced arithmetically,
+  # and is by definition short enough not to need it; sleep it whole.
+  case "$remaining" in
+    ''|*[!0-9]*)
+      sleep "$remaining"
+      watcher_beat
+      return
+      ;;
+  esac
+  local base
+  case "$POLL" in
+    ''|*[!0-9]*|0) base=1 ;;
+    *) base=$POLL ;;
+  esac
+  while [ "$remaining" -gt 0 ]; do
+    slice=$base
+    [ "$slice" -le "$remaining" ] || slice=$remaining
+    sleep "$slice"
+    remaining=$((remaining - slice))
+    watcher_beat
+  done
+}
+
 run_check_capture() {
   local pgid
   fm_check_output_cleanup
@@ -2259,7 +2326,10 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # watcher_beat owns why the cycle beats again at each of its own slow stages
+  # rather than only here, and why this opening beat also records the serial.
+  WATCHER_CYCLE=$((WATCHER_CYCLE + 1))
+  watcher_beat "$WATCHER_CYCLE"
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
@@ -2325,6 +2395,10 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # Each iteration opens by recording that the previous check returned, so
+      # a sweep of slow checks cannot accumulate into the beacon's age however
+      # the previous iteration left the loop.
+      watcher_beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -2420,7 +2494,7 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
+    beating_sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
@@ -2544,6 +2618,9 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    # One beat per window, recording that the previous window's capture
+    # returned: a fleet of panes is captured serially inside this one cycle.
+    watcher_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -2830,6 +2907,9 @@ EOF
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
-  # else the blind poll sleep. See event_wait_or_sleep.
+  # else the blind poll sleep. See event_wait_or_sleep. Beat first so the wait's
+  # own bounded window - not the cycle body that preceded it - is what the
+  # beacon's age measures while the watcher waits.
+  watcher_beat
   event_wait_or_sleep
 done
