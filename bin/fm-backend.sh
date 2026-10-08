@@ -536,6 +536,71 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   return 0
 }
 
+# fm_backend_task_endpoint_absent: is this record's runtime endpoint GENUINELY
+# ABSENT rather than merely wrong? A host restart can destroy the endpoint field
+# of a record whose work is already landed, leaving nothing to shut down and no
+# endpoint for fm_backend_validate_task_endpoint to validate - and no line an
+# operator could ever clear to get past its refusal.
+#
+# This answers only "the field is not there". It is a far narrower question than
+# validation, and it is deliberately not a weaker one: every identity the record
+# still carries must be as exact as validation demands, and the endpoint must be
+# missing OUTRIGHT. An empty, malformed, duplicated, or task-mismatched endpoint
+# is a CORRUPT record, never a destroyed one, and stays refused - the two cases
+# need opposite handling, so conflating them is the one mistake to avoid here.
+#
+# Absence alone authorizes nothing. It tells the caller that no endpoint action
+# is possible, and the caller must then establish from evidence outside this
+# record that the action it was going to take is safe without one.
+#
+# Orca is out of scope: its endpoint IS its terminal and its copy is released
+# through the Orca CLI with an endpoint-derived target, so an Orca record with
+# no endpoint has no cleanup path to authorize.
+#
+# Prints nothing. On success, sets FM_BACKEND_VALIDATED_BACKEND to the recorded
+# backend and FM_BACKEND_VALIDATED_TARGET to the empty string, so a caller that
+# branches on absence reads the same two globals as one that validated.
+fm_backend_task_endpoint_absent() {  # <meta-file> <task-id>
+  local meta=$1 id=$2 backend backend_count binding_count binding worktree project field
+  FM_BACKEND_VALIDATED_BACKEND=
+  FM_BACKEND_VALIDATED_TARGET=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  # Every field that names a runtime endpoint on any supported backend must be
+  # gone, not just the generic one: a record keeping a pane or terminal id has
+  # an endpoint whatever happened to its window= line.
+  for field in window terminal herdr_session herdr_workspace_id herdr_tab_id \
+    herdr_pane_id zellij_session zellij_tab_id zellij_pane_id \
+    cmux_workspace_id cmux_surface_id; do
+    [ "$(grep -c "^$field=" "$meta" 2>/dev/null || true)" -eq 0 ] || return 1
+  done
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || return 1
+  project=$(fm_backend_meta_exact_value "$meta" project) || return 1
+  case "$worktree$project" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  backend_count=$(grep -c '^backend=' "$meta" 2>/dev/null || true)
+  case "$backend_count" in
+    0) backend=tmux ;;
+    1) backend=$(fm_backend_meta_exact_value "$meta" backend) || return 1 ;;
+    *) return 1 ;;
+  esac
+  fm_backend_is_known "$backend" || return 1
+  [ "$backend" != orca ] || return 1
+  binding_count=$(grep -c '^endpoint_task_id=' "$meta" 2>/dev/null || true)
+  case "$binding_count" in
+    0) ;;
+    1)
+      binding=$(fm_backend_meta_exact_value "$meta" endpoint_task_id) || return 1
+      [ "$binding" = "$id" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_BACKEND=$backend
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_TARGET=
+  return 0
+}
+
 fm_backend_meta_for_window() {  # <target> <state-dir>
   local target=$1 state=$2 meta window terminal
   for meta in "$state"/*.meta; do

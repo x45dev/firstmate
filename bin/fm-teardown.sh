@@ -107,6 +107,32 @@
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
+# Endpoint absence (teardown-destroyed-endpoint): a host restart can destroy the
+# endpoint field of a record whose work is already fully landed. Cleanup then has
+# nothing to shut down and no endpoint to validate, and bin/fm-backend.sh's
+# validation refuses an absent endpoint unconditionally - so before this change
+# every such task was stranded permanently, holding a stale record row and an
+# unreclaimed copy that no ordinary lifecycle step could ever clear (observed
+# 2026-08-24). That refusal was right, and it stays: what was missing was a path
+# from "provably safe to clean up" to "cleaned up". Teardown now distinguishes
+# three cases rather than two:
+#   1. An endpoint that validates - shut it down, exactly as before.
+#   2. An endpoint GENUINELY ABSENT - no window=, no terminal=, and none of the
+#      per-backend pane identities - on a record whose every remaining identity
+#      is as exact as validation demands, AND whose work bin/fm-work-landed-lib.sh
+#      proves landed from the forge and the copy alone. Cleanup completes, skips
+#      every endpoint step, and says in its own output that it finished without an
+#      endpoint and on what evidence.
+#   3. Anything else - an empty, malformed, duplicated, or task-mismatched
+#      endpoint, or an absent one whose landed-ness cannot be proved - refuses
+#      exactly as today, with the same line it has always printed.
+# Case 2's proof reads none of the landed-ness the record carries: not pr=, not
+# pr_head=, not pr_landing=, not a recorded branch. It reads the recorded
+# worktree path, because nothing else can say where the copy is, and the
+# slot-owner claim below is what proves that path is still this task's. Never
+# infer case 2 from case 3 being inconvenient, and never relax it with --force:
+# --force authorizes discarding unlanded WORK, never manufacturing the evidence
+# a destroyed record no longer carries. Orca and secondmates stay in case 3.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately
 # before cleanup. Its current working directory is only incidental process
@@ -286,6 +312,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-work-landed-lib.sh
+. "$SCRIPT_DIR/fm-work-landed-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -912,7 +940,28 @@ fi
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+# It has three outcomes, not two (see the header's endpoint-absence section):
+# a validated endpoint, a GENUINELY ABSENT one, and everything else - which
+# still refuses here, with the same line it has always printed.
+# Absence only records that no endpoint action is possible; the landed-work
+# proof that authorizes finishing without one runs below, under the slot
+# ownership this teardown has established, and before any destructive step.
+# Secondmates are out of scope: retirement is not a landed-work question, so a
+# secondmate record with no endpoint stays case 3.
+TEARDOWN_ENDPOINT_ABSENT=0
+TEARDOWN_ENDPOINT_ABSENT_EVIDENCE=
+if [ "$TEARDOWN_META_KIND" != secondmate ] \
+   && fm_backend_task_endpoint_absent "$META" "$ID"; then
+  TEARDOWN_ENDPOINT_ABSENT=1
+else
+  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+fi
+# Every step that would read or command the endpoint consults this, so an absent
+# one is skipped consistently rather than by each step's own guess - the same
+# shape teardown_owns_worktree gives a reassigned copy.
+teardown_has_endpoint() {
+  [ "$TEARDOWN_ENDPOINT_ABSENT" != 1 ]
+}
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
@@ -964,9 +1013,17 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 # passed, immediately before the close marker binds to it, so any refusal
 # leaves the record byte-identical.
 if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
-  TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+  if [ "$TEARDOWN_ENDPOINT_ABSENT" = 1 ]; then
+    # There is no endpoint to classify, and incarnation ambiguity cannot
+    # misdirect an endpoint action that will never run. What the gate protects -
+    # that no agent is still bound to the endpoint this record names - is
+    # satisfied by the record naming none.
+    TEARDOWN_LEGACY_ENDPOINT=absent
+  else
+    TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+  fi
   case "$TEARDOWN_LEGACY_ENDPOINT" in
-    dead|missing) ;;
+    dead|missing|absent) ;;
     *)
       echo "REFUSED: task $ID's record predates spawn_gen and its recorded endpoint reads '$TEARDOWN_LEGACY_ENDPOINT', not confidently dead or agent-less; --legacy-record teardown is refused while an agent may still be bound to it. Nothing was changed." >&2
       echo "Reconcile the endpoint first (bin/fm-crew-state.sh $ID), or relaunch the task to publish an unambiguous incarnation, then retry teardown." >&2
@@ -1122,19 +1179,7 @@ elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
 fi
 
 default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  fm_work_landed_default_branch "$PROJ"
 }
 
 meta_value() {
@@ -1246,150 +1291,16 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
-# Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
-# single match and returns 0; returns non-zero on no match or any lookup failure,
-# so the caller treats it as "no PR found" (fail-safe).
-pr_number_from_branch() {
-  local branch=$1 out n
-  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
-  n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
-ensure_commit_object() {
-  local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
-}
-
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$unpushed
-EOF
-}
-
-# Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
-pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
-  if [ -n "$PR_URL" ]; then
-    target=$PR_URL
-  else
-    target=$(pr_number_from_branch "$branch") || return 1
-  fi
-  [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  remainder=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  head=${remainder%%$'\t'*}
-  resolved_url=${remainder#*$'\t'}
-  [ "$head" != "$remainder" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
-  [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
-    landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
-    landed=1
-  fi
-  [ "$landed" = 1 ] || return 1
-  if [ -z "$PR_URL" ]; then
-    [ -n "$resolved_url" ] || return 1
-    PR_URL=$resolved_url
-  fi
-  return 0
-}
-
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
-  else
-    return 1
-  fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
-}
-
 # Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# reachable from any remote-tracking branch? bin/fm-work-landed-lib.sh owns that
+# question and both routes that answer it; this wrapper only supplies the task's
+# recorded pull request and adopts the url the forge resolved when none was
+# recorded, so the backlog row can still link the delivery.
 work_is_landed() {
   local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  fm_work_landed "$WT" "$PROJ" "$PR_URL" "$branch" || return 1
+  [ -z "$FM_WORK_LANDED_PR_URL" ] || PR_URL=$FM_WORK_LANDED_PR_URL
+  return 0
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -1656,14 +1567,14 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty=$(fm_work_landed_dirty "$WT"); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -1671,7 +1582,6 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1921,6 +1831,10 @@ reap_task_backend_process_group() {  # <label>
   local label=$1 leader leader_start pgid current_pgid own_pgid
   if [ "$BACKEND" != tmux ]; then
     echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
+    return 0
+  fi
+  if ! teardown_has_endpoint; then
+    echo "warning: lsof is unavailable and task $ID records no endpoint; cannot resolve a process-group fallback" >&2
     return 0
   fi
   leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
@@ -3171,6 +3085,38 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+# The second of the three endpoint cases: the record's endpoint is genuinely
+# gone, so there is nothing to shut down and nothing to validate - and cleanup
+# may finish anyway, but only on landed-work evidence gathered WITHOUT the
+# record, because the record is what the loss damaged. bin/fm-work-landed-lib.sh
+# owns that proof: the copy answers whether anything is uncommitted and what its
+# HEAD and branch are, and the forge answers whether that work is merged. The
+# task's recorded pull request, PR head, branch, and landing verdict are all
+# deliberately unread. The recorded worktree path is still read, because nothing
+# else can say where the copy is, and the slot-owner claim resolved above is
+# what proves that path is still this task's.
+# This gate is not relaxed by --force or by a scout's scratch-copy carve-out:
+# --force authorizes discarding unlanded WORK, and neither flag nor kind can
+# conjure the evidence that a destroyed endpoint record no longer carries. A
+# reassigned slot cannot supply it either - the copy inspected would be another
+# task's - so that combination refuses rather than finishing the record cleanup
+# on a reading of work that was never this task's.
+if [ "$TEARDOWN_ENDPOINT_ABSENT" = 1 ]; then
+  if ! teardown_owns_worktree; then
+    echo "REFUSED: task $ID has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
+    echo "Its recorded copy belongs to task $TEARDOWN_SLOT_REASSIGNED_TO now, so nothing can prove this task's own work landed, and cleanup without a recorded endpoint needs that proof." >&2
+    exit 1
+  fi
+  if ! fm_work_landed_independently "$WT" "$PROJ"; then
+    echo "REFUSED: task $ID has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
+    echo "There is no endpoint to shut down, and cleanup may finish without one only when the work is independently proved landed, which it is not: $FM_WORK_LANDED_EVIDENCE." >&2
+    echo "Land the work (push the branch, merge its pull request), or restore the endpoint by relaunching the task, then re-run teardown." >&2
+    exit 1
+  fi
+  TEARDOWN_ENDPOINT_ABSENT_EVIDENCE=$FM_WORK_LANDED_EVIDENCE
+  echo "task $ID has no recorded endpoint to shut down; finishing cleanup on independent evidence that its work landed: $TEARDOWN_ENDPOINT_ABSENT_EVIDENCE"
+fi
+
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -3194,7 +3140,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && teardown_has_endpoint; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -3385,6 +3331,8 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
+elif ! teardown_has_endpoint; then
+  :
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
@@ -3410,7 +3358,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && teardown_has_endpoint; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -3446,7 +3394,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if teardown_has_endpoint; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
@@ -3506,11 +3456,15 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
+TEARDOWN_ENDPOINT_REPORT="window $T"
+if [ "$TEARDOWN_ENDPOINT_ABSENT" = 1 ]; then
+  TEARDOWN_ENDPOINT_REPORT="no recorded endpoint; $TEARDOWN_ENDPOINT_ABSENT_EVIDENCE"
+fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
-  echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+  echo "teardown $ID complete ($TEARDOWN_ENDPOINT_REPORT, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
-  echo "teardown $ID complete (window $T, worktree $WT)"
+  echo "teardown $ID complete ($TEARDOWN_ENDPOINT_REPORT, worktree $WT)"
 else
-  echo "teardown $ID complete (window $T; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
+  echo "teardown $ID complete ($TEARDOWN_ENDPOINT_REPORT; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
 backlog_refresh_reminder

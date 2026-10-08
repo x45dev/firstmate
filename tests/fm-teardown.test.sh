@@ -670,6 +670,177 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# A record whose runtime endpoint field was destroyed - no window=, no
+# endpoint_task_id= - while every other identity it carries is intact. This is
+# what a host restart leaves behind for a task whose work had already landed.
+# Args: case_dir mode kind
+write_meta_without_endpoint() {
+  local case_dir=$1 mode=$2 kind=$3
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode" \
+    "spawn_gen=teardown-test-task-x1"
+}
+
+# Report every pull request lookup by url or number as merged with the supplied
+# head, while the forge finds NO pull request for the branch. A record-driven
+# landed check passes on this fixture and an independent one cannot, which is
+# what separates reading the task's own record from asking the forge.
+add_gh_pr_merged_only_by_recorded_target() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+  "api /repos/"*) printf '%s\n' true ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# A landed task whose endpoint record is gone has every condition the endpoint
+# guard protects provably satisfied, and before the three-case split there was
+# no line an operator could clear to get past its refusal.
+test_absent_endpoint_landed_work_is_cleaned_up() {
+  local case_dir rc
+  case_dir=$(make_case absent-endpoint-landed)
+  write_meta_without_endpoint "$case_dir" no-mistakes ship
+  # Squash-merged on the forge's default branch: the branch's own commits are
+  # on no remote, so only the default branch proves the work landed.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-endpoint-landed: cleanup should complete without an endpoint"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "absent-endpoint-landed: cleanup printed a REFUSED line"
+  grep -q 'no recorded endpoint' "$case_dir/stdout" \
+    || fail "absent-endpoint-landed: cleanup did not say it finished without an endpoint"
+  grep -q 'already present in refs/remotes/origin/main' "$case_dir/stdout" \
+    || fail "absent-endpoint-landed: cleanup did not name the evidence it finished on"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "absent-endpoint-landed: the stale task record survived cleanup"
+  pass "a landed task whose endpoint record was destroyed is cleaned up, naming its evidence"
+}
+
+test_absent_endpoint_with_uncommitted_work_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case absent-endpoint-dirty)
+  write_meta_without_endpoint "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # One uncommitted file is work that has not landed, whatever the forge says
+  # about the commits.
+  printf '%s\n' "in progress" > "$case_dir/wt/scratch.txt"
+  git -C "$case_dir/wt" add -- scratch.txt
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "absent-endpoint-dirty: cleanup should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "absent-endpoint-dirty: no REFUSED line in stderr"
+  grep -q 'uncommitted changes' "$case_dir/stderr" \
+    || fail "absent-endpoint-dirty: refusal did not name the uncommitted work"
+  assert_refusal_retained_task_state "$case_dir" absent-endpoint-dirty "$head"
+  pass "an endpointless task with one uncommitted file still refuses, and --force cannot supply the evidence"
+}
+
+test_absent_endpoint_with_unlanded_work_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case absent-endpoint-unlanded)
+  write_meta_without_endpoint "$case_dir" no-mistakes ship
+  # Real content on no remote, with no pull request (the default fixture mock)
+  # and nothing on the default branch: genuinely unlanded.
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "absent-endpoint-unlanded: cleanup should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "absent-endpoint-unlanded: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" absent-endpoint-unlanded "$head"
+  pass "an endpointless task whose work never landed still refuses"
+}
+
+test_absent_endpoint_never_reads_the_records_own_pull_request() {
+  local case_dir rc head
+  case_dir=$(make_case absent-endpoint-record-pr)
+  write_meta_without_endpoint "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # The record claims a merged pull request containing exactly this head, and
+  # the forge confirms it when asked by that url - but the forge knows no pull
+  # request for the branch and the default branch does not carry the content.
+  # The record is the artifact a lost endpoint proves unreliable, so cleanup
+  # without an endpoint must not accept it as proof.
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' "pr_head=$head" \
+    >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_merged_only_by_recorded_target "$case_dir" "$head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "absent-endpoint-record-pr: cleanup should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "absent-endpoint-record-pr: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" absent-endpoint-record-pr "$head"
+  pass "cleanup without an endpoint never accepts the task record's own pull request as landed-work proof"
+}
+
+test_empty_endpoint_still_refuses_when_the_work_landed() {
+  local case_dir rc head
+  case_dir=$(make_case corrupt-endpoint-landed)
+  # An endpoint field present but empty is a CORRUPT record, not a destroyed
+  # one, and the two need opposite handling: landed work does not excuse it.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "corrupt-endpoint-landed: cleanup should refuse"
+  grep -q 'missing, empty, or ambiguous window endpoint' "$case_dir/stderr" \
+    || fail "corrupt-endpoint-landed: refusal did not keep the endpoint validation line"
+  assert_refusal_retained_task_state "$case_dir" corrupt-endpoint-landed "$head"
+  pass "an empty endpoint field refuses even on landed work, since a corrupt record is not a destroyed one"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -3756,3 +3927,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_absent_endpoint_landed_work_is_cleaned_up
+test_absent_endpoint_with_uncommitted_work_refuses
+test_absent_endpoint_with_unlanded_work_refuses
+test_absent_endpoint_never_reads_the_records_own_pull_request
+test_empty_endpoint_still_refuses_when_the_work_landed
