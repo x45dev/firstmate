@@ -324,6 +324,7 @@ ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
+  # shellcheck disable=SC2034 # read by bin/fm-update.sh, which sources this lib
   FF_SKIP_REASON=""
 
   if [ ! -d "$dir" ]; then
