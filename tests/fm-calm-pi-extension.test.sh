@@ -1292,11 +1292,19 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} was not hidden before export rendering`);
   }
 }
+function toolRendererLookup(lookup) {
+  return { getToolRenderers: lookup, getToolDefinition: lookup };
+}
 async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    // Pi renamed this lookup from getToolDefinition to getToolRenderers in
+    // 0.99.0. Supplying both spellings keeps the export path really exercised
+    // on either side of that rename: an unrecognized name leaves the lookup
+    // undefined, which makes every renderCall return undefined and this case
+    // pass without having rendered anything.
+    ...toolRendererLookup((name) => tools.find((tool) => tool.name === name)),
     theme,
     cwd: process.cwd(),
   });
@@ -1327,7 +1335,7 @@ getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
 const unmatchedRenderer = createToolHtmlRenderer({
-  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  ...toolRendererLookup((name) => tools.find((tool) => tool.name === name)),
   theme,
   cwd: process.cwd(),
 });
@@ -3525,7 +3533,7 @@ TS
 {"type":"message","id":"a0000016","parentId":"a0000015","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":16}}
 JSON
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 200 \
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
@@ -3533,7 +3541,6 @@ JSON
   assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
   assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
   assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
-  assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
     "native session-start context unexpectedly rendered while Calm was off"
@@ -3545,6 +3552,15 @@ JSON
   wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
     || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
+  # Ctrl+O is also where Pi reports its loaded resources. Pi used to list the
+  # loaded extensions in the default startup banner, which a restored
+  # transcript this tall then painted over; since 1.1.0 that banner carries a
+  # changelog instead and the extension list lives behind Ctrl+O, so the
+  # auto-load is asserted here, where Pi actually shows it. Pi 1.1.0 prints the
+  # absolute path and older Pi the bare filename, which this substring spans.
+  wait_for_text "$expanded_snapshot" "fm-calm.ts" \
+    || fail "project-local Pi calm extension did not auto-load"
+  assert_contains "$(cat "$expanded_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -3733,19 +3749,84 @@ JS
     || fail "Chrome or Chromium is required for rendered export DOM assertions; set FM_CHROME_BIN to one"
   chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
     || fail "could not render calm-mode HTML export DOM: $chrome_report"
+  # Every condition below names itself and prints what it saw before failing.
+  # This check needs a real Chrome render of a real Pi export, so it can only run
+  # where both exist, which in practice is CI; a bare exit status there says only
+  # that one of eight conditions broke, and the next step has to be guessed. The
+  # names and excerpts are what make a failure here diagnosable from the CI log
+  # alone, so they are part of the assertion rather than scaffolding to remove.
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
+const violations = [];
+const violate = (condition, evidence) => violations.push({ condition, evidence });
+const near = (haystack, needle, span = 220) => {
+  const at = haystack.indexOf(needle);
+  if (at < 0) return "(not present)";
+  return JSON.stringify(haystack.slice(Math.max(0, at - span), at + span));
+};
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
 const tree = dom.match(/<div[^>]*id="tree-container"[^>]*>([\s\S]*?)<div[^>]*id="tree-status"/)?.[1];
-if (!messages || !tree) process.exit(1);
-if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) process.exit(1);
-if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
-if (messages.includes('<div class="hook-message"')) process.exit(1);
-if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
-for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
-  if (!messages.includes(current)) process.exit(1);
+if (!messages || !tree) {
+  violate("conversation and tree regions are both locatable", `dom_bytes=${dom.length} messages_region=${messages ? "found" : "missing"} tree_region=${tree ? "found" : "missing"}`);
+} else {
+  if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) {
+    violate("the genuine user prompt is rendered as a user message", `user_message_divs=${(messages.match(/<div class="user-message"/g) ?? []).length} prompt_text=${messages.includes("Show a deterministic tool example.") ? "present" : "absent"} first_user_div=${near(messages, '<div class="user-message"', 160)}`);
+  }
+  if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) {
+    violate("the genuine assistant reply is rendered as an assistant message", `assistant_message_divs=${(messages.match(/<div class="assistant-message"/g) ?? []).length} reply_text=${messages.includes("The deterministic tool example is complete.") ? "present" : "absent"} first_assistant_div=${near(messages, '<div class="assistant-message"', 160)}`);
+  }
+  // Pi used to drop a custom message whose display flag was false, so a synthetic
+  // operational entry simply never reached the conversation region. Since 1.1.0 it
+  // renders every custom message and marks the undisplayed ones
+  // `hook-message-hidden`, which its own stylesheet hides with
+  // `body:not(.show-hidden-messages) .hook-message-hidden { display: none }` while
+  // `showHiddenMessages` starts false. The boundary upstream means to keep is the
+  // same one this check exists for, so it is asserted in the terms Pi now uses:
+  // the synthetic entry may sit in the document, but only inside a hook message
+  // marked hidden, and the document must not start out revealing those. That is
+  // stricter than the old absence test, which could only ever confirm that Pi had
+  // dropped the entry for us, and it holds on both sides of the change, since a Pi
+  // that drops the entry renders no occurrence to judge.
+  const bodyTag = dom.match(/<body[^>]*>/)?.[0] ?? "";
+  if (/\bshow-hidden-messages\b/.test(bodyTag)) {
+    violate("the export does not start out revealing messages marked hidden", `body tag=${JSON.stringify(bodyTag)}`);
+  }
+  const hookClasses = [...messages.matchAll(/<div class="(hook-message[^"]*)"/g)].map((m) => m[1]);
+  const visibleHooks = hookClasses.filter((cls) => !cls.split(/\s+/).includes("hook-message-hidden"));
+  if (visibleHooks.length > 0) {
+    violate("no hook message is rendered as visible conversation", `visible_hook_classes=${JSON.stringify(visibleHooks)} excerpt=${near(messages, `<div class="${visibleHooks[0]}"`)}`);
+  }
+  // Each occurrence is judged by the hook message it sits in, found by walking back
+  // to the nearest preceding opening tag. An occurrence with no such tag before it
+  // is loose in the conversation rather than contained, which is the break this
+  // condition is named for.
+  const syntheticLabel = "[firstmate-synthetic-input]";
+  for (let at = messages.indexOf(syntheticLabel); at >= 0; at = messages.indexOf(syntheticLabel, at + 1)) {
+    const before = messages.slice(0, at);
+    const opening = before.match(/<div class="(hook-message[^"]*)"[^>]*>(?![\s\S]*<div class="hook-message)/);
+    const container = opening?.[1];
+    if (!container || !container.split(/\s+/).includes("hook-message-hidden")) {
+      violate("the synthetic operational input appears only inside a hook message marked hidden", `container=${container ? JSON.stringify(container) : "none: the label is not inside a hook message"} excerpt=${near(messages, syntheticLabel)}`);
+      break;
+    }
+  }
+  for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
+    if (!messages.includes(current)) {
+      violate(`the export preserves operational input ${current}`, `${current} absent from the conversation region; in_whole_dom=${dom.includes(current) ? "yes" : "no"}`);
+    }
+  }
+  for (const needle of ["firstmate-synthetic-input", "/tmp/probe.status"]) {
+    if (!tree.includes(needle)) {
+      violate(`the tree view preserves ${needle}`, `${needle} absent from the tree region; in_whole_dom=${dom.includes(needle) ? "yes" : "no"}`);
+    }
+  }
 }
-if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
+if (violations.length === 0) process.exit(0);
+for (const { condition, evidence } of violations) {
+  console.error(`rendered export DOM violation: ${condition}`);
+  console.error(`  evidence: ${evidence}`);
+}
+process.exit(1);
 JS
   # Calm returns the transcript to its own presentation once the export has been
   # rendered. That repaint runs on the macrotask right after Pi prints the export
@@ -4116,7 +4197,7 @@ JS
     active_screen_wait=$((active_screen_wait + 1))
   done
   [ "$(cat "$home/config/calm")" = on ] || fail "Calm was not restored before the persistence restart"
-  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 180 -y 44
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 180 -y 200
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -4124,7 +4205,7 @@ JS
     || fail "Pi did not exit cleanly before the Calm persistence restart"
   tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
+  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 200 \
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$restarted_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "Pi did not restore the persisted session after restart"

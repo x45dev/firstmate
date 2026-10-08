@@ -2037,6 +2037,77 @@ ${context.command}
     return stockOutcomesPreviewLines ?? undefined;
   };
 
+  // These tools render their own call line, and whenever Calm is off that line
+  // must still read exactly like Pi's stock tool-call header: the captain sees
+  // the two side by side in one transcript, and the contract case in
+  // tests/fm-pi-branch-extension.test.sh compares this extension's rendering
+  // against a stock ToolExecutionComponent byte for byte. Pi 0.99.0 started
+  // appending the argument summary to that header (its
+  // core/tools/render-utils.ts formatToolCallWithArgs) and does not export the
+  // formatter, so the formatting is carried below against that version and the
+  // contract case is what catches any further upstream drift.
+  //
+  // Whether the installed Pi's stock header carries the arguments at all is
+  // asked of that Pi rather than assumed from its version number, the same way
+  // getStockOutcomesPreviewLines asks it for the collapsed preview bound. A Pi
+  // older than 0.99.0 renders the title alone, so emitting the summary there
+  // would be the very divergence this matching exists to avoid.
+  let stockCallHeaderCarriesArgs: boolean | undefined;
+  const stockHeaderCarriesArgs = (): boolean => {
+    if (stockCallHeaderCarriesArgs !== undefined) return stockCallHeaderCarriesArgs;
+    const probeToken = "FM_STOCK_ARGS_PROBE";
+    try {
+      const probeDefinition: ToolDefinition = {
+        name: "fm_stock_args_probe",
+        label: "Args probe",
+        description: "Args probe",
+        parameters: Type.Object({}),
+        execute: async () => ({ content: [], details: undefined }),
+      };
+      const probe = new ToolExecutionComponent(
+        probeDefinition.name,
+        "fm-stock-args-probe",
+        { probe: probeToken },
+        { showImages: false },
+        probeDefinition,
+        { requestRender() {} } as ConstructorParameters<typeof ToolExecutionComponent>[5],
+        root,
+      );
+      stockCallHeaderCarriesArgs = probe.render(4096).join("\n").includes(probeToken);
+    } catch {
+      stockCallHeaderCarriesArgs = false;
+    }
+    return stockCallHeaderCarriesArgs;
+  };
+
+  const STOCK_COLLAPSED_ARGS_CHARS = 100;
+  const formatStockToolCallHeader = (
+    title: string,
+    args: unknown,
+    theme: Parameters<NonNullable<ToolDefinition["renderCall"]>>[1],
+    expanded: boolean,
+  ): string => {
+    const header = theme.fg("toolTitle", theme.bold(title));
+    if (args == null || !stockHeaderCarriesArgs()) return header;
+    const entries: [string, unknown][] =
+      typeof args === "object" && !Array.isArray(args) ? Object.entries(args) : [["args", args]];
+    if (entries.length === 0) return header;
+    if (expanded) {
+      const lines = entries.map(([key, value]) => {
+        const text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
+        const body = text.replace(/\t/g, "   ").replace(/\r/g, "").split("\n").join("\n    ");
+        return `  ${key}: ${body}`;
+      });
+      return `${header}\n${theme.fg("muted", lines.join("\n"))}`;
+    }
+    const pairs = entries.map(([key, value]) => `${key}=${JSON.stringify(value) ?? String(value)}`).join(" ");
+    const preview =
+      pairs.length > STOCK_COLLAPSED_ARGS_CHARS
+        ? `${pairs.slice(0, STOCK_COLLAPSED_ARGS_CHARS - 3)}...`
+        : pairs;
+    return `${header} ${theme.fg("muted", preview)}`;
+  };
+
   type OutcomesToolShellState = {
     shell?: Box;
     call?: Text;
@@ -2071,11 +2142,11 @@ ${context.command}
       recent: Type.Optional(Type.Number({ description: "How many most-recent outcomes to read (default 20)" })),
     }),
     renderShell: "self",
-    renderCall: (_args, theme, context) => {
+    renderCall: (args, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
       const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
+      shellState.call = new Text(formatStockToolCallHeader("fm_branch_outcomes", args, theme, context.expanded), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
     renderResult: (result, options, theme, context) => {
@@ -2133,11 +2204,11 @@ ${context.command}
       through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
     }),
     renderShell: "self",
-    renderCall: (_args, theme, context) => {
+    renderCall: (args, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
       const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_processed")), 0, 0);
+      shellState.call = new Text(formatStockToolCallHeader("fm_branch_processed", args, theme, context.expanded), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
     renderResult: (result, _options, theme, context) => {
