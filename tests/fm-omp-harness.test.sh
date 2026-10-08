@@ -555,7 +555,12 @@ const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-l
 if (marker[1] !== String(process.pid)) throw new Error("loaded marker must record the session pid");
 const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
-await new Promise((r) => setTimeout(r, 2500));
+// The arm child sleeps before it closes, so wait for the wake rather than for
+// a fixed span a loaded runner can overrun, then settle to prove the delivery
+// is still exactly one and not merely the first of several.
+const deadline = Date.now() + 30000;
+while (sent.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+await new Promise((r) => setTimeout(r, 1500));
 if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
 if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
 if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");

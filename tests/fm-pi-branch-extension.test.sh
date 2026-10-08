@@ -4344,8 +4344,18 @@ if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100
 }
 
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
-const stockHtml = createToolHtmlRenderer({ getToolDefinition: () => stockDefinition, theme, cwd: process.cwd() });
-const actualHtml = createToolHtmlRenderer({ getToolDefinition: () => actualDefinition, theme, cwd: process.cwd() });
+// Pi renamed this lookup from getToolDefinition to getToolRenderers in 0.99.0.
+// Supplying both spellings keeps the delegation really exercised on either
+// side of that rename: an unrecognized name leaves the lookup undefined, which
+// makes every call return undefined for the wrong reason.
+const htmlDeps = (definition) => ({
+  getToolRenderers: () => definition,
+  getToolDefinition: () => definition,
+  theme,
+  cwd: process.cwd(),
+});
+const stockHtml = createToolHtmlRenderer(htmlDeps(stockDefinition));
+const actualHtml = createToolHtmlRenderer(htmlDeps(actualDefinition));
 const stockCall = stockHtml.renderCall("stock-html", "fm_branch_outcomes", args);
 const actualCall = actualHtml.renderCall("actual-html", "fm_branch_outcomes", args);
 const stockResult = stockHtml.renderResult("stock-html", "fm_branch_outcomes", result.content, result.details, false);

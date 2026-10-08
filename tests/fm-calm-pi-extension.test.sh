@@ -1292,11 +1292,19 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} was not hidden before export rendering`);
   }
 }
+function toolRendererLookup(lookup) {
+  return { getToolRenderers: lookup, getToolDefinition: lookup };
+}
 async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    // Pi renamed this lookup from getToolDefinition to getToolRenderers in
+    // 0.99.0. Supplying both spellings keeps the export path really exercised
+    // on either side of that rename: an unrecognized name leaves the lookup
+    // undefined, which makes every renderCall return undefined and this case
+    // pass without having rendered anything.
+    ...toolRendererLookup((name) => tools.find((tool) => tool.name === name)),
     theme,
     cwd: process.cwd(),
   });
@@ -1327,7 +1335,7 @@ getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
 const unmatchedRenderer = createToolHtmlRenderer({
-  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  ...toolRendererLookup((name) => tools.find((tool) => tool.name === name)),
   theme,
   cwd: process.cwd(),
 });
