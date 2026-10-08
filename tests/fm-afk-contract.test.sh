@@ -246,6 +246,59 @@ test_words_preserve_final_newline_shape() {
   pass "words preserve their final newline shape in storage and read-back"
 }
 
+# A fake `date` whose every CURRENT-time call advances one second, so the gap
+# between two independent date calls is certain instead of rare. Calls that name
+# an explicit instant (-r/-d) pass straight through, because those render a
+# timestamp rather than read the clock.
+install_advancing_date() {  # <dir> -> prints the bin dir to prepend to PATH
+  local dir=$1 bin real
+  bin="$dir/fakebin"
+  real=$(command -v date)
+  mkdir -p "$bin"
+  cat > "$bin/date" <<SH
+#!/usr/bin/env bash
+real=$real
+SH
+  cat >> "$bin/date" <<'SH'
+counter=${FM_FAKE_DATE_COUNTER:?FM_FAKE_DATE_COUNTER must be set}
+for arg in "$@"; do
+  case "$arg" in -r*|-d*) exec "$real" "$@" ;; esac
+done
+now=$(cat "$counter" 2>/dev/null || printf '1700000000')
+now=$((now + 1))
+printf '%s\n' "$now" > "$counter"
+exec "$real" -d "@$now" "$@"
+SH
+  chmod +x "$bin/date"
+  printf '%s\n' "$bin"
+}
+
+test_record_entry_stamps_cannot_disagree_by_a_second() {
+  # bin/fm-afk-return.sh renders the away window from entered_epoch while the
+  # record shows `entered`, so the two halves of that pair must come from ONE
+  # clock read. They used to come from two independent `date` calls, which left
+  # the brief reporting a window one second away from the record whenever those
+  # calls straddled a second - and the same for the confirmation pair.
+  local home bin iso epoch
+  home=$(make_home advancing-clock)
+  bin=$(install_advancing_date "$home")
+  PATH="$bin:$PATH" FM_FAKE_DATE_COUNTER="$home/clock" \
+    contract "$home" propose --words 'merge it when green' \
+      --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1 \
+    || fail "propose failed under an advancing clock"
+  PATH="$bin:$PATH" FM_FAKE_DATE_COUNTER="$home/clock" \
+    contract "$home" confirm >/dev/null 2>&1 || fail "confirm failed under an advancing clock"
+  epoch=$(contract "$home" field entered_epoch)
+  iso=$(contract "$home" field entered)
+  [ "$iso" = "$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)" ] \
+    || fail "the record's entry time and its epoch disagree: $iso vs epoch $epoch"
+  epoch=$(contract "$home" field confirmed_epoch)
+  iso=$(contract "$home" field confirmed)
+  [ "$iso" = "$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)" ] \
+    || fail "the record's confirmation time and its epoch disagree: $iso vs epoch $epoch"
+  pass "a record's timestamp pairs come from one clock read, so the return brief and the record agree"
+}
+
 test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   local home out record proposed_epoch
   home=$(make_home lifecycle)
@@ -700,5 +753,6 @@ test_merge_grants_empty_form_and_usage_errors
 test_legacy_record_without_merge_grants_reads_empty
 test_malformed_merge_grants_refuse_validation
 test_archive_drops_live_grants
+test_record_entry_stamps_cannot_disagree_by_a_second
 test_record_changes_refuse_while_a_reader_holds_the_lock
 

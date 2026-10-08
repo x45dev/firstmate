@@ -725,6 +725,33 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+test_verdict_reason_covers_every_verdict_in_plain_language() {
+  # The away-delivery alarm reports WHY an update did not land, and it is often
+  # the only thing that reaches the owner. Every verdict this library can return
+  # therefore needs a reason here, none of them may leak the verdict token, and
+  # an unrecognized verdict must degrade to the safe description rather than to
+  # an empty string.
+  local verdict out
+  for verdict in empty pending pending-unproven need-identity unknown; do
+    out=$(fm_composer_verdict_reason "$verdict")
+    [ -n "$out" ] || fail "no reason for the '$verdict' verdict"
+    # The hyphenated tokens are the ones that would read as machine vocabulary
+    # to a person; "empty" and "pending" are ordinary English and may appear.
+    case "$out" in
+      *pending-unproven*|*need-identity*) fail "the '$verdict' reason leaks a verdict token: $out" ;;
+    esac
+  done
+  out=$(fm_composer_verdict_reason "")
+  [ "$out" = "$(fm_composer_verdict_reason some-future-verdict)" ] \
+    || fail "an unset and an unrecognized verdict read differently"
+  case "$out" in
+    *"could not be read"*) ;;
+    *) fail "an unrecognized verdict does not degrade to unreadable: $out" ;;
+  esac
+  pass "fm_composer_verdict_reason: every verdict has a plain-language reason and an unknown one degrades safely"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_verdict_reason_covers_every_verdict_in_plain_language
