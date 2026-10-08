@@ -1,0 +1,8 @@
+ok - a landed legacy record with a dead endpoint tears down and logs its accepted incarnation
+ok - an endpoint that cannot be confidently read as dead refuses --legacy-record teardown
+ok - a legacy stamp a failed rollback left behind still faces the endpoint gate
+ok - a landed task whose endpoint record was destroyed is cleaned up, naming its evidence
+ok - an endpointless task with one uncommitted file still refuses, and --force cannot supply the evidence
+ok - an endpointless task whose work never landed still refuses
+ok - cleanup without an endpoint never accepts the task record's own pull request as landed-work proof
+ok - an empty endpoint field refuses even on landed work, since a corrupt record is not a destroyed one
