@@ -2634,6 +2634,40 @@ test_reachable_alert_never_escapes_to_the_wake_queue() {
   pass "a host whose alert channel reaches the owner never escapes to the wake queue"
 }
 
+test_flapping_alert_resets_the_unreached_count() {
+  # The bound counts CONSECUTIVE windows whose alert reached nobody. A window
+  # in which the alert did reach the owner ends that run, so unreached,
+  # delivered, unreached, unreached is two in a row and must queue nothing.
+  local dir state emptybin ch
+  dir=$(make_wedge_case unreached-flapping); state="$dir/state"
+  emptybin="$dir/emptybin"; mkdir -p "$emptybin"
+  printf '#!/usr/bin/env bash\nprintf "FreeBSD\\n"\n' > "$emptybin/uname"
+  chmod +x "$emptybin/uname"
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+  escalate_add "$state" "done: PR checks green"
+  escalate_unreached_reset
+  rows() { local n; n=$(grep -c 'away-escalations-undelivered' "$state/.wake-queue" 2>/dev/null || true); echo "${n:-0}"; }
+  for ch in none osascript none none; do
+    rm -f "$state/.subsuper-inject-wedged"; WEDGE_ALARM_LAST_EPOCH=0
+    if [ "$ch" = osascript ]; then
+      PATH="$emptybin:$dir/fakebin:$PATH" LOG="$dir/daemon.log" FM_MAX_DEFER_SECS=1 \
+        FM_WEDGE_ALARM_CHANNEL=osascript FM_WEDGE_ALARM_EXEC=discard \
+        inject_wedge_alarm "$state" 600
+    else
+      PATH="$emptybin:$dir/fakebin:$PATH" LOG="$dir/daemon.log" FM_MAX_DEFER_SECS=1 \
+        inject_wedge_alarm "$state" 600
+    fi
+  done
+  [ "$(rows)" -eq 0 ] \
+    || fail "a delivered window did not end the run of unreached windows; the bound tripped on a flapping channel"
+  rm -f "$state/.subsuper-inject-wedged"; WEDGE_ALARM_LAST_EPOCH=0
+  PATH="$emptybin:$dir/fakebin:$PATH" LOG="$dir/daemon.log" FM_MAX_DEFER_SECS=1 \
+    inject_wedge_alarm "$state" 600
+  [ "$(rows)" -eq 1 ] \
+    || fail "three consecutive unreached windows after the delivered one did not queue exactly one row (got $(rows))"
+  pass "a delivered alert resets the unreached count; only consecutive unreached windows reach the bound"
+}
+
 test_wedge_marker_states_the_outcome_and_the_reason() {
   # The marker and the alert are the only things that reach the owner when every
   # other channel has failed, so they say what happened and what it costs, in
@@ -3087,6 +3121,7 @@ test_undeliverable_away_window_hands_the_updates_to_the_wake_queue
 test_undeliverable_away_window_does_not_escape_before_the_bound
 test_undeliverable_away_window_escapes_once_not_once_per_window
 test_reachable_alert_never_escapes_to_the_wake_queue
+test_flapping_alert_resets_the_unreached_count
 test_wedge_marker_states_the_outcome_and_the_reason
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written

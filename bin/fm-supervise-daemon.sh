@@ -1163,7 +1163,10 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     # The bounded escape. An alert the owner switched off is silence they asked
     # for; an alert that reached nobody is the failure this guards, and it is
     # the one case where retrying the same channels cannot help.
-    [ "$WEDGE_ALARM_LAST_DELIVERED" = unreached ] && escalate_unreached "$state" "$age"
+    case "$WEDGE_ALARM_LAST_DELIVERED" in
+      unreached) escalate_unreached "$state" "$age" ;;
+      delivered) WEDGE_UNREACHED_COUNT=0; WEDGE_UNREACHED_QUEUED=0 ;;
+    esac
   fi
   return 0
 }
