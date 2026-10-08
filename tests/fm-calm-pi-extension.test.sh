@@ -3775,11 +3775,40 @@ if (!messages || !tree) {
   if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) {
     violate("the genuine assistant reply is rendered as an assistant message", `assistant_message_divs=${(messages.match(/<div class="assistant-message"/g) ?? []).length} reply_text=${messages.includes("The deterministic tool example is complete.") ? "present" : "absent"} first_assistant_div=${near(messages, '<div class="assistant-message"', 160)}`);
   }
-  if (messages.includes('<div class="hook-message"')) {
-    violate("no hook message is rendered into the conversation", near(messages, '<div class="hook-message"'));
+  // Pi used to drop a custom message whose display flag was false, so a synthetic
+  // operational entry simply never reached the conversation region. Since 1.1.0 it
+  // renders every custom message and marks the undisplayed ones
+  // `hook-message-hidden`, which its own stylesheet hides with
+  // `body:not(.show-hidden-messages) .hook-message-hidden { display: none }` while
+  // `showHiddenMessages` starts false. The boundary upstream means to keep is the
+  // same one this check exists for, so it is asserted in the terms Pi now uses:
+  // the synthetic entry may sit in the document, but only inside a hook message
+  // marked hidden, and the document must not start out revealing those. That is
+  // stricter than the old absence test, which could only ever confirm that Pi had
+  // dropped the entry for us, and it holds on both sides of the change, since a Pi
+  // that drops the entry renders no occurrence to judge.
+  const bodyTag = dom.match(/<body[^>]*>/)?.[0] ?? "";
+  if (/\bshow-hidden-messages\b/.test(bodyTag)) {
+    violate("the export does not start out revealing messages marked hidden", `body tag=${JSON.stringify(bodyTag)}`);
   }
-  if (messages.includes("[firstmate-synthetic-input]")) {
-    violate("the synthetic operational input is not rendered into the conversation", near(messages, "[firstmate-synthetic-input]"));
+  const hookClasses = [...messages.matchAll(/<div class="(hook-message[^"]*)"/g)].map((m) => m[1]);
+  const visibleHooks = hookClasses.filter((cls) => !cls.split(/\s+/).includes("hook-message-hidden"));
+  if (visibleHooks.length > 0) {
+    violate("no hook message is rendered as visible conversation", `visible_hook_classes=${JSON.stringify(visibleHooks)} excerpt=${near(messages, `<div class="${visibleHooks[0]}"`)}`);
+  }
+  // Each occurrence is judged by the hook message it sits in, found by walking back
+  // to the nearest preceding opening tag. An occurrence with no such tag before it
+  // is loose in the conversation rather than contained, which is the break this
+  // condition is named for.
+  const syntheticLabel = "[firstmate-synthetic-input]";
+  for (let at = messages.indexOf(syntheticLabel); at >= 0; at = messages.indexOf(syntheticLabel, at + 1)) {
+    const before = messages.slice(0, at);
+    const opening = before.match(/<div class="(hook-message[^"]*)"[^>]*>(?![\s\S]*<div class="hook-message)/);
+    const container = opening?.[1];
+    if (!container || !container.split(/\s+/).includes("hook-message-hidden")) {
+      violate("the synthetic operational input appears only inside a hook message marked hidden", `container=${container ? JSON.stringify(container) : "none: the label is not inside a hook message"} excerpt=${near(messages, syntheticLabel)}`);
+      break;
+    }
   }
   for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
     if (!messages.includes(current)) {
