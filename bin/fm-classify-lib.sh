@@ -1789,8 +1789,11 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
+#   paused  - the crew's authoritative current state is a declared wait that is
+#             EXPECTED to idle: an external-wait pause (paused:) or the
+#             captain-held transfer, which block on different humans and are kept
+#             distinct by the state line itself, but share one absorb cadence
+#             exactly as status_is_paused_or_captain_held says they do;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
@@ -1805,7 +1808,7 @@ crew_absorb_class() {  # <id>
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  if [ "$state" = paused ] || [ "$state" = captain-held ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
@@ -1838,7 +1841,10 @@ crew_is_paused() {  # <id>
 # from one bin/fm-crew-state.sh read. Prints exactly one token:
 #   complete    the crew's work is finished and whatever remains belongs to
 #               firstmate or the captain, so its idle pane is the outcome rather
-#               than a symptom - the one state whose stillness is expected;
+#               than a symptom - the one state whose stillness is expected. A
+#               declared captain-held transfer says exactly that in the other
+#               direction: the wait is on the captain, so a wedge timer has
+#               nothing to measure;
 #   run-active  its validation run reports RECENT activity on the step it is
 #               actually executing, so the run is parked on something remote
 #               rather than stopped (the pipeline's own last_activity recency,
@@ -1867,7 +1873,7 @@ crew_wedge_class() {  # <id>
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || { printf 'none'; return; }
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = "done" ]; then printf 'complete'; return; fi
+  if [ "$state" = "done" ] || [ "$state" = captain-held ]; then printf 'complete'; return; fi
   case "$line" in
     "state: working"*"run-activity: recent"*) printf 'run-active'; return ;;
   esac

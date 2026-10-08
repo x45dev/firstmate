@@ -104,24 +104,58 @@ SH
 #!/usr/bin/env bash
 set -u
 # FM_FAKE_TMUX_MISSING: the window is authoritatively gone - every addressed
-# call fails, but the session inventory still answers successfully and simply
-# omits the window, which is what proves absence.
+# call fails, and the session inventory still answers successfully while simply
+# omitting the window, which is what proves absence.
 # FM_FAKE_TMUX_UNREADABLE: tmux itself cannot answer - it fails to execute (a
 # trimmed PATH) or errors non-definitively - so even the inventory fails, with
 # a message that is NOT one of the definitive no-session/no-server/no-socket
 # responses that fm_backend_tmux_agent_state owns as death.
+# FM_FAKE_TMUX_SHELL_ONLY: the window survives with nothing but a login shell
+# in it, which is what a reboot leaves behind (fm-crew-state-working-while-dead).
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
+    # The inventory a present window must appear in before its foreground
+    # command may be trusted, served from the recorded metadata so a pane whose
+    # addressed calls succeed is never contradicted by an empty inventory. With
+    # FM_FAKE_TMUX_MISSING the answer still succeeds and omits every window, so
+    # absence is proved by the answer rather than by an addressed call failing.
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 0
+    for meta in "${FM_STATE_OVERRIDE:-/nonexistent}"/*.meta; do
+      [ -e "$meta" ] || continue
+      win=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2-)
+      [ -n "$win" ] || continue
+      printf '%s\n' "${win#*:}"
+    done
     ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    # The requested format decides the answer: the liveness probe asks for the
+    # pane's current command and its tty, not for the pane id.
+    case "${*: -1}" in
+      '#{pane_current_command}')
+        if [ "${FM_FAKE_TMUX_SHELL_ONLY:-0}" = 1 ]; then printf 'zsh\n'; else printf 'claude\n'; fi
+        exit 0 ;;
+      '#{pane_tty}')
+        printf '/dev/nonexistent-fm-test\n'; exit 0 ;;
+    esac
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    # FM_FAKE_PANE_NOTICE renders a rendered-signal line. With
+    # FM_FAKE_PANE_TRANSIENT it appears in the FIRST capture only, which is the
+    # unsettled pane a single capture cannot tell from a real park
+    # (fm-crew-state-allowance-pane-debounce).
+    if [ -n "${FM_FAKE_PANE_NOTICE:-}" ]; then
+      n=$(cat "${FM_STATE_OVERRIDE:-/nonexistent}/.fake-capture-count" 2>/dev/null || echo 0)
+      printf '%s' "$(( n + 1 ))" > "${FM_STATE_OVERRIDE:-/nonexistent}/.fake-capture-count" 2>/dev/null || true
+      if [ "${FM_FAKE_PANE_TRANSIENT:-0}" != 1 ] || [ "$n" -eq 0 ]; then
+        printf 'scrollback\n%s\n' "$FM_FAKE_PANE_NOTICE"
+        exit 0
+      fi
+      printf 'scrollback\nordinary output\n'
+      exit 0
+    fi
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
     else printf 'all quiet\n> \n'; fi ;;
 esac
@@ -180,7 +214,18 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  cat > "$fb/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+# The forge read the reader uses to establish whether a pull request actually
+# merged. FM_FAKE_PR_STATE serves the state verbatim (OPEN, MERGED, CLOSED);
+# empty means the forge could not be read, which must never be mistaken for a
+# merge.
+[ -n "${FM_FAKE_PR_STATE:-}" ] || exit 1
+printf '%s\n' "$FM_FAKE_PR_STATE"
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/gh"
   printf '%s\n' "$fb"
 }
 
@@ -214,6 +259,33 @@ arm_idle_record() {  # <state-dir> <id>
     --source claude-hook --event stop
 }
 
+# A movement record in a known verdict, written through the library's own
+# observe interface (bin/fm-progress-lib.sh) rather than by hand, so a change to
+# the record format cannot leave these cases asserting a shape nothing reads.
+# The requested verdict is asserted, so a fixture that stops producing it fails
+# instead of going quietly vacuous.
+write_progress_sample() {  # <state-dir> <id> <still|advanced>
+  local state=$1 id=$2 want=$3 got second
+  # Decided outside the command substitution: stock Bash 3.2 cannot parse a
+  # case statement nested inside $( ).
+  if [ "$want" = still ]; then
+    second=$(printf 'esc to interrupt\n123 tokens\n')
+  elif [ "$want" = advanced ]; then
+    second=$(printf 'esc to interrupt\n456 tokens\n')
+  else
+    fail "unsupported movement fixture verdict '$want'"
+  fi
+  got=$(
+    FM_PROGRESS_MIN_GAP_SECS=0
+    export FM_PROGRESS_MIN_GAP_SECS
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-progress-lib.sh"
+    fm_progress_observe "$state" "$id" "$(printf 'esc to interrupt\n123 tokens\n')" >/dev/null
+    fm_progress_observe "$state" "$id" "$second"
+  )
+  [ "$got" = "$want" ] || fail "movement fixture produced '$got', wanted '$want'"
+}
+
 # Clear the fake-driver vars and (re-)mark them exported, so the per-test plain
 # assignments below stay exported into the fakes without an `export VAR=$(...)`
 # command-substitution assignment (SC2155).
@@ -225,6 +297,10 @@ reset_fakes() {
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_TMUX_UNREADABLE=0
+  FM_FAKE_TMUX_SHELL_ONLY=0
+  FM_FAKE_PANE_NOTICE=""
+  FM_FAKE_PANE_TRANSIENT=0
+  FM_FAKE_PR_STATE=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_READ_FAIL=0
@@ -235,6 +311,7 @@ reset_fakes() {
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_TMUX_SHELL_ONLY FM_FAKE_PANE_NOTICE FM_FAKE_PANE_TRANSIENT FM_FAKE_PR_STATE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN
 }
@@ -1600,6 +1677,262 @@ test_no_run_herdr_stale_working_record_is_never_busy() {
   pass "herdr stale working record never reports a shell-only pane busy"
 }
 
+# --- the reader never asserts a state it has not established ----------------
+# One defect family across the whole precedence ladder: a trailing non-state
+# status line erased the state the log had already recorded, a stale busy
+# marker outlived its agent, a passed run asserted a merge nobody checked, a
+# single pane capture was enough to claim an allowance park, and the
+# captain-held declaration had no mapping at all.
+
+# fm-crew-state-unknown-while-working: the log's last line is a `note:`, which
+# is deliberately not a state. Reading only that line erased a correctly
+# declared pause and reported unknown - the reading that invites relaunching a
+# healthy worker. The fold must reach back to the most recent real state and
+# let the note annotate it.
+test_trailing_note_folds_back_to_the_declared_state() {
+  reset_fakes
+  local d; d=$(new_case trailing-note)
+  make_repo_on_branch "$d/wt" fm/feat-trailing-note
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-trailing-note.meta" "window=fm:fm-feat-trailing-note" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'paused: awaiting an upstream maintainer release\n'
+    printf 'note: SEPARATE DEFECT observed while waiting\n'
+  } > "$d/state/feat-trailing-note.status"
+  arm_idle_record "$d/state" feat-trailing-note
+  local out; out=$(run_crew_state "$d" feat-trailing-note)
+  assert_contains "$out" "state: paused" "a trailing note must not erase the declared pause"
+  assert_contains "$out" "source: status-log" "the folded state keeps the status-log source"
+  assert_contains "$out" "awaiting an upstream maintainer release" "the declared wait's own reason is the detail"
+  assert_contains "$out" "SEPARATE DEFECT" "the trailing note annotates the state it followed"
+  assert_not_contains "$out" "state: unknown" "a readable log with a declared state is never unknown"
+  pass "a trailing note annotates the declared state instead of erasing it"
+}
+
+# The same fold on the terminal end: a worker that records a finding after
+# reporting its PR green must still read done, because that is what supervision
+# stops watching on.
+test_trailing_note_after_done_still_reads_done() {
+  reset_fakes
+  local d; d=$(new_case trailing-note-done)
+  make_repo_on_branch "$d/wt" fm/feat-note-done
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-note-done.meta" "window=fm:fm-feat-note-done" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'done: PR https://github.com/o/r/pull/7 checks green\n'
+    printf 'note: the predicted false green materialised\n'
+  } > "$d/state/feat-note-done.status"
+  arm_idle_record "$d/state" feat-note-done
+  local out; out=$(run_crew_state "$d" feat-note-done)
+  assert_contains "$out" "state: done" "a trailing note must not erase a terminal done"
+  assert_contains "$out" "pull/7" "the done line's own PR reference survives the fold"
+  pass "a trailing note after done still reads done"
+}
+
+# The fold's own boundary: `resolved:` exists solely to CLOSE the decision above
+# it, so folding backwards must never resurrect the blocker it closed.
+test_trailing_resolved_does_not_resurrect_the_closed_blocker() {
+  reset_fakes
+  local d; d=$(new_case trailing-resolved)
+  make_repo_on_branch "$d/wt" fm/feat-resolved
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-resolved.meta" "window=fm:fm-feat-resolved" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'blocked: the credential was missing\n'
+    printf 'resolved: the credential arrived\n'
+  } > "$d/state/feat-resolved.status"
+  arm_idle_record "$d/state" feat-resolved
+  local out; out=$(run_crew_state "$d" feat-resolved)
+  assert_not_contains "$out" "state: blocked" "a resolved line must never resurrect the blocker it closed"
+  assert_not_contains "$out" "the credential was missing" "the closed blocker's prose is not current detail"
+  pass "a trailing resolved line does not resurrect the blocker it closed"
+}
+
+# A resolved line closes only the decision it followed; an older declared wait
+# that was never the resolved decision still stands.
+test_resolved_line_leaves_an_older_declared_wait_standing() {
+  reset_fakes
+  local d; d=$(new_case resolved-older-pause)
+  make_repo_on_branch "$d/wt" fm/feat-resolved-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-resolved-pause.meta" "window=fm:fm-feat-resolved-pause" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  {
+    printf 'paused: holding for the upstream tool release\n'
+    printf 'blocked: the credential was missing\n'
+    printf 'resolved: the credential arrived\n'
+  } > "$d/state/feat-resolved-pause.status"
+  arm_idle_record "$d/state" feat-resolved-pause
+  local out; out=$(run_crew_state "$d" feat-resolved-pause)
+  assert_contains "$out" "state: paused" "the older declared wait is what remains after the blocker closed"
+  assert_contains "$out" "holding for the upstream tool release" "its own reason is the detail"
+  pass "a resolved line closes its blocker and leaves the older declared wait standing"
+}
+
+# fm-crew-state-blind-to-captain-held: fm-classify-lib.sh treats `captain-held`
+# as a first-class declared wait, and this reader had no case for it, so
+# declaring the wait reported unknown - which bearings renders as an
+# unavailable state, making the correct declaration worse than no declaration.
+test_captain_held_log_reads_captain_held() {
+  reset_fakes
+  local d; d=$(new_case captain-held)
+  make_repo_on_branch "$d/wt" fm/feat-captain-held
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-captain-held.meta" "window=fm:fm-feat-captain-held" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'captain-held: complete, PR https://github.com/o/r/pull/9 awaiting the merge decision\n' \
+    > "$d/state/feat-captain-held.status"
+  arm_idle_record "$d/state" feat-captain-held
+  local out; out=$(run_crew_state "$d" feat-captain-held)
+  assert_contains "$out" "state: captain-held" "the captain-held verb has its own state"
+  assert_contains "$out" "source: status-log" "the declared hold is read from the log"
+  assert_contains "$out" "pull/9" "the hold's own reason is the detail"
+  assert_not_contains "$out" "state: unknown" "a declared hold is never an unavailable state"
+  pass "a captain-held status line reports its own declared-hold state"
+}
+
+# The same verb through the two watcher predicates that read this line: a
+# declared hold must reach the bounded pause cadence rather than surface as a
+# possible wedge, and must give a wedge timer nothing to measure.
+test_captain_held_is_absorbed_like_a_declared_wait() {
+  reset_fakes
+  local d; d=$(new_case captain-held-absorb)
+  make_repo_on_branch "$d/wt" fm/feat-ch-absorb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ch-absorb.meta" "window=fm:fm-ch-absorb" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'captain-held: PR https://github.com/o/r/pull/9 awaiting the merge decision\n' \
+    > "$d/state/ch-absorb.status"
+  arm_idle_record "$d/state" ch-absorb
+  local absorb wedge
+  absorb=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" STATE="$d/state" \
+    bash -c '. "$1/bin/fm-classify-lib.sh"; crew_absorb_class ch-absorb' _ "$ROOT")
+  wedge=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" STATE="$d/state" \
+    bash -c '. "$1/bin/fm-classify-lib.sh"; crew_wedge_class ch-absorb' _ "$ROOT")
+  assert_equals "paused" "$absorb" "a declared hold gets the bounded declared-wait cadence"
+  assert_equals "complete" "$wedge" "a declared hold leaves a wedge timer nothing to measure"
+  pass "a captain-held state is absorbed as a declared wait and not wedge-escalated"
+}
+
+# fm-crewstate-asserts-unverified-merge: the passed branch asserted "PR
+# merged/closed" from the pipeline's own run outcome alone. The PR was open with
+# a failing check, and because run-step outranks the log, five corrections to
+# the log changed nothing.
+test_passed_run_never_asserts_an_unverified_merge() {
+  reset_fakes
+  local d; d=$(new_case passed-unverified-merge)
+  make_repo_on_branch "$d/wt" fm/feat-passed-merge
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-passed-merge.meta" "window=fm:fm-feat-passed-merge" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-passed-merge)"
+  # The forge says the pull request is open, which is the shape that made the
+  # false completion unkillable.
+  FM_FAKE_PR_STATE=OPEN
+  local out; out=$(run_crew_state "$d" feat-passed-merge)
+  assert_not_contains "$out" "merged" "an open pull request must never be reported merged"
+  assert_not_contains "$out" "state: done" "an open pull request is not a landed outcome"
+  assert_contains "$out" "state: captain-held" "work delivered with an open pull request is a hold on a merge decision"
+  assert_contains "$out" "source: run-step" "the run outcome is still the source of the reading"
+  assert_contains "$out" "pull/1" "the reading names the pull request it is waiting on"
+  # The forge confirms the merge: the same run then reports it, as established.
+  FM_FAKE_PR_STATE=MERGED
+  out=$(run_crew_state "$d" feat-passed-merge)
+  assert_contains "$out" "state: done" "a verified merge is a done reading"
+  assert_contains "$out" "merged" "a verified merge may be named"
+  # The forge cannot be read: done on the run's own evidence, with no merge claim.
+  FM_FAKE_PR_STATE=""
+  out=$(run_crew_state "$d" feat-passed-merge)
+  assert_contains "$out" "state: done" "an unreadable forge does not invalidate the run outcome"
+  assert_not_contains "$out" "PR merged" "an unreadable forge may not be reported as a merge"
+  assert_contains "$out" "merge unverified" "an unverified merge says so"
+  pass "a passed run never asserts a merge the forge has not confirmed"
+}
+
+# fm-crew-state-working-while-dead: after the 2026-08-23 reboot every pane
+# survived as a bare restored shell, and a gen-matching busy record still read
+# `working - source: pane`. A positive false claim is worse than unknown: a
+# dead worker reported working is never recovered.
+test_busy_record_over_a_shell_only_pane_is_never_working() {
+  reset_fakes
+  local d; d=$(new_case busy-over-shell)
+  make_repo_on_branch "$d/wt" fm/feat-busy-shell
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-busy-shell.meta" "window=fm:fm-feat-busy-shell" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-busy-shell)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-busy-shell busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  # The window survived with nothing but a login shell in it.
+  FM_FAKE_TMUX_SHELL_ONLY=1
+  local out; out=$(run_crew_state "$d" feat-busy-shell)
+  assert_not_contains "$out" "state: working" "a busy record over a shell-only pane must never read working"
+  assert_contains "$out" "agent gone" "the reading must name the positive agent-gone evidence"
+  # The control: the same record with the harness still in the pane is working.
+  FM_FAKE_TMUX_SHELL_ONLY=0
+  out=$(run_crew_state "$d" feat-busy-shell)
+  assert_contains "$out" "state: working" "the same record with a live agent still reads working"
+  pass "a busy record over a shell-only pane reads agent gone, never working"
+}
+
+# fm-crewstate-busy-needs-movement: the watcher's busy gate already refuses a
+# busy marker a measured `still` contradicts, and this reader did not, so
+# anyone reading it directly saw the same false-alive string.
+test_busy_record_is_refused_by_a_measured_still() {
+  reset_fakes
+  local d; d=$(new_case busy-still)
+  make_repo_on_branch "$d/wt" fm/feat-busy-still
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-busy-still.meta" "window=fm:fm-feat-busy-still" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-busy-still)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-busy-still busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  # A missing movement record establishes nothing and must change nothing.
+  local out; out=$(run_crew_state "$d" feat-busy-still)
+  assert_contains "$out" "state: working" "no movement record leaves the busy reading untouched"
+  # A measured `still` is the counter-evidence: no proof of life at all.
+  write_progress_sample "$d/state" feat-busy-still still
+  out=$(run_crew_state "$d" feat-busy-still)
+  assert_not_contains "$out" "state: working" "a measured still must refuse the busy marker"
+  # A measured advance leaves the busy reading standing.
+  write_progress_sample "$d/state" feat-busy-still advanced
+  out=$(run_crew_state "$d" feat-busy-still)
+  assert_contains "$out" "state: working" "a measured advance keeps the busy reading"
+  pass "a measured still refuses the busy marker and a measured advance keeps it"
+}
+
+# fm-crew-state-allowance-pane-debounce: the watcher trusts the rendered
+# allowance arm only once a capture is byte-identical across two polls, and this
+# reader fed it a single fresh capture, so a pane transiently showing
+# limit-notice-like text read as parked.
+test_allowance_pane_arm_needs_a_settled_capture() {
+  reset_fakes
+  local d; d=$(new_case allowance-unsettled)
+  make_repo_on_branch "$d/wt" fm/feat-allowance
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-allowance.meta" "window=fm:fm-feat-allowance" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  arm_idle_record "$d/state" feat-allowance
+  printf 'working: under way\n' > "$d/state/feat-allowance.status"
+  FM_FAKE_PANE_NOTICE="You've hit your session limit · resets 8:30am (UTC)"
+  # The notice is in the first capture only: an unsettled pane, not a park.
+  FM_FAKE_PANE_TRANSIENT=1
+  local out; out=$(FM_CREW_STATE_SETTLE_SECS=0 run_crew_state "$d" feat-allowance)
+  assert_not_contains "$out" "source: allowance" "one unsettled capture may not assert a park"
+  assert_not_contains "$out" "state: parked" "a transient notice is not a park"
+  # The control: the same notice still rendered on the second capture is a park.
+  rm -f "$d/state/.fake-capture-count"
+  FM_FAKE_PANE_TRANSIENT=0
+  out=$(FM_CREW_STATE_SETTLE_SECS=0 run_crew_state "$d" feat-allowance)
+  assert_contains "$out" "state: parked" "a settled notice still reads as a park"
+  assert_contains "$out" "source: allowance" "the park keeps its allowance source"
+  pass "the rendered allowance arm needs a settled capture before it asserts a park"
+}
+
 # Decision follow-up (2026-09-05 review): a husk pane (pane present,
 # agent_not_found) is authoritative death evidence - it keeps the gone-class
 # text so the stale sweep may still reclaim it, never unknown/unreachable.
@@ -2602,5 +2935,15 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
+test_trailing_note_folds_back_to_the_declared_state
+test_trailing_note_after_done_still_reads_done
+test_trailing_resolved_does_not_resurrect_the_closed_blocker
+test_resolved_line_leaves_an_older_declared_wait_standing
+test_captain_held_log_reads_captain_held
+test_captain_held_is_absorbed_like_a_declared_wait
+test_passed_run_never_asserts_an_unverified_merge
+test_busy_record_over_a_shell_only_pane_is_never_working
+test_busy_record_is_refused_by_a_measured_still
+test_allowance_pane_arm_needs_a_settled_capture
 
 echo "all fm-crew-state tests passed"

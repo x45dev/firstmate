@@ -15,7 +15,14 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <allowance|run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|captain-held|failed|unknown> · source: <allowance|run-step|pane|status-log|remote-endpoint|none> · <detail>
+#
+# The one rule every branch below serves: never assert a state this read has not
+# established. An absent source is `unknown`, and positive counter-evidence
+# refuses a claim rather than being outvoted by it - a busy marker over a pane
+# the process level proves agent-free, a busy marker a measured `still`
+# contradicts, a rendered allowance notice one unsettled capture showed, and a
+# merge no forge confirmed are each refused here rather than reported.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -81,9 +88,14 @@
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
 #   5. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      recorded backend's pane busy state, then to the status log FOLDED
+#      BACKWARDS to the most recent line whose verb maps to a recognized
+#      run-state. A non-state verb annotates the state it followed rather than
+#      erasing it, because `note:` is deliberately not a state and a worker
+#      recording a finding at the moment it sees one is correct behavior.
+#      Decision-only events such as `resolved` never become current state or
+#      detail, and `resolved` additionally CLOSES the one needs-decision or
+#      blocked line it followed, so the fold never resurrects it (fold_status_log).
 #   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -115,6 +127,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-allowance-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-progress-lib.sh
+. "$SCRIPT_DIR/fm-progress-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -166,19 +182,26 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
-log_last_line() {
-  [ -f "$LOG" ] || return 1
-  grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
-}
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
-# and its reason rather than a wedge-suspect idle.
+# and its reason rather than a wedge-suspect idle. `captain-held` is the other
+# declared wait fm-classify-lib.sh keeps deliberately distinct from it
+# (FM_CLASSIFY_CAPTAIN_HELD_VERB): both idle by design and share one supervision
+# cadence, but they block on DIFFERENT humans, so collapsing the hold onto
+# `paused` would point the captain at an external dependency for a wait only they
+# can clear. Its own state keeps that distinction; fm-classify-lib.sh's
+# crew_absorb_class and crew_wedge_class own what each supervisor does with it.
+# `unknown` here is also the "not a state" test the fold below reuses, so there is
+# no second verb list anywhere.
 map_log_state() {  # <line>
   if status_is_paused "$1"; then
     echo paused
+    return
+  fi
+  if status_is_captain_held "$1"; then
+    echo captain-held
     return
   fi
   case "$(status_line_verb "$1")" in
@@ -191,8 +214,78 @@ map_log_state() {  # <line>
   esac
 }
 
-LOG_LINE=$(log_last_line || true)
+# Fold the append-only status log backwards to the line that states the crew's
+# CURRENT declared state, and keep what was appended after it as annotation.
+# Sets LOG_LINE (the state-bearing line, empty when the log states none) and
+# LOG_ANNOTATION (the newest non-state line that followed it, empty when none).
+#
+# Reading only the last line made the record's meaning depend on what happened to
+# be appended last. A `note:` is deliberately not a state, so a worker recording
+# a real finding - correct behavior, at exactly the moment its attention is on
+# the finding - erased a correctly declared `paused:` or a terminal `done:` and
+# left the crew reading `unknown`. That is not a harmless downgrade: the recovery
+# playbook treats an unreadable crew as a relaunch candidate, and relaunching one
+# that is merely parked with unlanded work is how that work is lost. It also
+# defeated the watcher's declared-pause classification, re-escalating a
+# deliberately parked task as a possible wedge once an hour. Three workers broke
+# the record this way in one evening, two of them after being told not to, which
+# is why this is fixed in the reader and not asked of the writers.
+#
+# `resolved:` is the one non-state verb that does more than annotate: it exists
+# solely to CLOSE the keyed needs-decision or blocked line it followed
+# (fm-classify-lib.sh's FM_CLASSIFY_RESOLVE_VERB), so the fold must not walk
+# past it and resurrect that blocker as the present. Each resolved line cancels
+# exactly one such older line, which leaves any OTHER declared state above them
+# standing - the fold reports the record's meaning, not just its last word.
+fold_status_log() {
+  LOG_LINE=''
+  LOG_ANNOTATION=''
+  [ -f "$LOG" ] || return 0
+  local -a lines=()
+  local line verb resolve_verb pending=0 i
+  resolve_verb=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  while IFS= read -r line; do
+    case "$line" in *[![:space:]]*) lines[${#lines[@]}]=$line ;; esac
+  done < "$LOG"
+  i=${#lines[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$(( i - 1 ))
+    line=${lines[$i]}
+    verb=$(status_line_verb "$line")
+    if [ "$verb" = "$resolve_verb" ]; then
+      pending=$(( pending + 1 ))
+      [ -n "$LOG_ANNOTATION" ] || LOG_ANNOTATION="later $verb: $(status_line_note "$line")"
+      continue
+    fi
+    if [ "$(map_log_state "$line")" = unknown ]; then
+      [ -n "$LOG_ANNOTATION" ] || LOG_ANNOTATION="later ${verb:-note}: $(status_line_note "$line")"
+      continue
+    fi
+    case "$verb" in
+      needs-decision|blocked)
+        if [ "$pending" -gt 0 ]; then
+          pending=$(( pending - 1 ))
+          continue
+        fi
+        ;;
+    esac
+    LOG_LINE=$line
+    return 0
+  done
+  return 0
+}
+
+fold_status_log
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+# The detail a status-log reading reports: the state-bearing line's own note,
+# plus whatever was appended after it, so the annotation that used to erase the
+# state is carried beside it instead.
+log_detail() {
+  local note
+  note=$(status_line_note "$LOG_LINE")
+  [ -z "$LOG_ANNOTATION" ] || note="$note${SEP}$LOG_ANNOTATION"
+  printf '%s' "$note"
+}
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -216,7 +309,7 @@ if [ -n "$REMOTE_HOST" ]; then
       if [ -n "$LOG_VERB" ]; then
         LOG_STATE=$(map_log_state "$LOG_LINE")
         if [ "$LOG_STATE" != unknown ]; then
-          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
+          emit "$LOG_STATE" status-log "$(log_detail)${SEP}remote endpoint alive on $REMOTE_HOST"
         fi
       fi
       emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
@@ -290,13 +383,35 @@ crew_busy_verdict() {  # <target>
 # answered by their own host above). The pane arm is given the same bounded
 # capture the busy read uses; a worker whose endpoint has already gone reads from
 # its transcript alone.
+#
+# The RENDERED arm needs one guard the structural arm does not. bin/fm-watch.sh
+# trusts it only on a capture that has settled - byte-identical across two polls
+# - because a pane transiently showing limit-notice-like text (scrollback, a
+# worker quoting the notice, a redraw mid-frame) renders exactly like a worker
+# sitting at its limit prompt in one frame. This reader had no such gate, so one
+# fresh capture was enough to assert a park. It re-captures once instead, and
+# reports the park only when the second capture carries the same notice: the
+# asymmetry was the defect, not the watcher's caution. The structural
+# session-record arm needs no settling and is reported immediately, so a real
+# park is never delayed by a signal that does not come from the pane.
+FM_CREW_STATE_SETTLE_SECS=${FM_CREW_STATE_SETTLE_SECS:-1}
+case "$FM_CREW_STATE_SETTLE_SECS" in ''|*[!0-9]*) FM_CREW_STATE_SETTLE_SECS=1 ;; esac
+allowance_pane_signal_settled() {  # <first-detail>
+  local first=$1 again detail
+  [ "$FM_CREW_STATE_SETTLE_SECS" = 0 ] || sleep "$FM_CREW_STATE_SETTLE_SECS"
+  again=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+  detail=$(fm_allowance_park_detail "$HARNESS" "$WT" "$again") || return 1
+  [ "$detail" = "$first" ]
+}
 if [ -n "$WT" ]; then
   ALLOWANCE_TAIL=''
   if [ -n "$BACKEND_TARGET" ]; then
     ALLOWANCE_TAIL=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || ALLOWANCE_TAIL=''
   fi
   if ALLOWANCE_DETAIL=$(fm_allowance_park_detail "$HARNESS" "$WT" "$ALLOWANCE_TAIL"); then
-    emit parked allowance "${ALLOWANCE_DETAIL#* } (${ALLOWANCE_DETAIL%% *} signal; the refused turn already ended, so it resumes on a steering message rather than a keystroke)"
+    if [ "${ALLOWANCE_DETAIL%% *}" != pane ] || allowance_pane_signal_settled "$ALLOWANCE_DETAIL"; then
+      emit parked allowance "${ALLOWANCE_DETAIL#* } (${ALLOWANCE_DETAIL%% *} signal; the refused turn already ended, so it resumes on a steering message rather than a keystroke)"
+    fi
   fi
 fi
 
@@ -514,6 +629,66 @@ nm_daemon_probe_down() {
   return 1
 }
 
+# The forge's own answer for the run's recorded pull request, as
+# open|merged|closed|unknown. `unknown` covers every read that did not answer -
+# no PR recorded, no gh, a bounded call that timed out, an unrecognized word -
+# because the only fact this reader needs is whether a merge was CONFIRMED.
+#
+# This exists because the passed branch below used to assert "PR merged/closed"
+# from the pipeline's own run outcome alone. A run read passed while the forge
+# reported the pull request open with a failing check, and since run-step
+# outranks the status log by design, five corrections to that log changed
+# nothing: the claim was unkillable because it was made by the one source
+# nothing else may contradict. A reading that stops supervision watching, and
+# leaves teardown's unlanded-work refusal as the last guard over pushed work, is
+# the one place in this script that has to ask rather than infer. It asks once,
+# bounded, and only on a terminal passed outcome, which is a rare and short-lived
+# state - never on the hot working path.
+nm_pr_forge_state() {  # <pr-url>
+  local url=$1 state
+  [ -n "$url" ] || { printf 'unknown'; return; }
+  command -v gh >/dev/null 2>&1 || { printf 'unknown'; return; }
+  # Bounded through the one owner of bounded execution (bin/fm-timeout-lib.sh),
+  # so a hung forge call cannot outlive this read. Hitting the bound is an
+  # unanswered read like any other.
+  state=$( cd "$WT" && fm_run_timed "$NM_TIMEOUT" gh pr view "$url" --json state -q .state 2>/dev/null ) || state=''
+  case "$(trim "$state" | tr '[:upper:]' '[:lower:]')" in
+    open)   printf 'open' ;;
+    merged) printf 'merged' ;;
+    closed) printf 'closed' ;;
+    *)      printf 'unknown' ;;
+  esac
+}
+
+# Classify a terminal PASSED run by what the forge actually says about its pull
+# request. A confirmed merge or close is the landed outcome the run claimed; an
+# unreadable forge leaves the run's own outcome standing and states the merge as
+# unverified, because an absent answer is not a contradiction.
+#
+# An OPEN pull request is the case the old detail string got wrong, and it is
+# `captain-held`: the work is delivered, nothing is running, and the only thing
+# left is a human merge decision. That is what this state names, and it is the
+# reading each consumer needs - supervision keeps watching instead of stopping,
+# the inactive-outcome scan does not raise a completion notice for work that has
+# not landed, bearings renders a hold rather than a finished task, and the wedge
+# timer still has nothing to measure on the idle pane (fm-classify-lib.sh's
+# crew_wedge_class), which is what kept two crews holding a green PR from
+# alarming. Reporting `done` here is what made the false completion unkillable:
+# run-step outranks the status log by design, so nothing downstream could
+# correct it.
+nm_classify_passed_run() {
+  local pr_url forge
+  pr_url=$(strip_quotes "$(nm_field pr)")
+  forge=$(nm_pr_forge_state "$pr_url")
+  case "$forge" in
+    merged) RUN_STATE="done";     RUN_DETAIL="run passed: PR merged" ;;
+    closed) RUN_STATE="done";     RUN_DETAIL="run passed: PR closed unmerged" ;;
+    open)   RUN_STATE=captain-held; RUN_DETAIL="run passed but the PR is still open: awaiting a merge decision" ;;
+    *)      RUN_STATE="done";     RUN_DETAIL="run passed: merge unverified (the forge did not answer)" ;;
+  esac
+  [ -z "$pr_url" ] || RUN_DETAIL="$RUN_DETAIL: $pr_url"
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -705,7 +880,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)        nm_classify_passed_run ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
@@ -762,7 +937,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(log_detail)${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -773,7 +948,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(log_detail)${SEP}run still monitoring PR"
     fi
   fi
 
@@ -791,7 +966,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     needs-decision|blocked)
       if [ "$LOG_VERB" = blocked ] \
         && log_reports_daemon_socket_down "$LOG_LINE"; then
-        emit blocked status-log "$(status_line_note "$LOG_LINE")${SEP}daemon socket down despite attributed run record"
+        emit blocked status-log "$(log_detail)${SEP}daemon socket down despite attributed run record"
       fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
@@ -891,10 +1066,50 @@ fi
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
+#
+# A busy verdict is a CLAIM about a live agent, and two independent sources can
+# refuse it. Both refuse only on positive evidence, so a task with neither says
+# exactly what it said before they existed.
+#
+#   the process level - the recovery-grade classifier (fm_backend_agent_state,
+#     tmux and herdr) answering `dead` or `missing` proves there is no agent
+#     behind the marker. After the 2026-08-23 reboot every pane survived as a
+#     bare restored shell and their gen-matching records still read `working`,
+#     which is worse than unknown: unknown is visibly an absence of information,
+#     while working is a positive false claim supervision acts on, so a dead
+#     worker reported working is never recovered, never relaunched and never
+#     escalated. It simply stops progressing while the fleet view says it is
+#     fine. Reported as gone, the same gone-class text the unreadable-endpoint
+#     path above emits, so the stale sweep can reclaim it.
+#   the movement record - a measured `still` (bin/fm-progress-lib.sh) means
+#     none of the three counters moved: no proof of life at all. bin/fm-watch.sh
+#     already refuses a busy marker that contradicts, and this reader did not,
+#     so anyone reading it directly - the session digest, the away daemon, every
+#     recovery skill - saw the same false-alive string the watcher had stopped
+#     trusting. `unknown`, `alive` and `advanced` all leave the marker standing:
+#     one sample can never answer a question about movement, and `alive` is the
+#     deliberate degradation for a notation the progress counter cannot parse.
+#     A refused marker is not death evidence, only an unestablished claim, so it
+#     falls through to the declared record below rather than reporting gone.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      case "$TASK_BACKEND" in
+        tmux|herdr) BUSY_AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
+        *) BUSY_AGENT_STATE=unverified ;;
+      esac
+      case "$BUSY_AGENT_STATE" in
+        dead|missing)
+          emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains; busy marker ${BUSY_VERDICT#* } outlived it)"
+          ;;
+      esac
+      if [ "$(fm_progress_verdict "$STATE" "$ID")" = still ]; then
+        BUSY_REFUSED="busy marker ${BUSY_VERDICT#* } refused: the movement record measured no proof of life"
+      else
+        emit working pane "harness busy (${BUSY_VERDICT#* })"
+      fi
+      ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
@@ -913,8 +1128,8 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    emit "$LOG_STATE" status-log "$(log_detail)"
   fi
 fi
 
-emit unknown none "no current-state source available"
+emit unknown none "${BUSY_REFUSED:-no current-state source available}"
