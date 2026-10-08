@@ -285,7 +285,9 @@ cargo-deny (licenses, advisories, bans, sources)
 governance (frontmatter, prose, links, config-layout)
 ```
 
-After it the push run's names are narrowed to the ones that pull-request run also produced, and what was set aside is named with the evidence for setting it aside:
+After it the push run's names are narrowed to the ones at least one of the workflow's newest five successful pull-request runs also produced, and what was set aside is named with the evidence for setting it aside.
+The transcript below was recorded when the narrowing read only the single newest pull-request run, so it names one run where the current output lists up to five (`narrowed to its pull-request runs <ids>`); it has not been re-run since the union, so treat the run ids as historical.
+The union is what stops a lighter newest run, such as a path-filtered or docs-only pull request, from dropping a suite an earlier pull request produced.
 
 ```
 required suites: 3, from x45dev/qrarca ci run 34421372166 narrowed to its pull-request run 30418714800 on main
@@ -296,7 +298,7 @@ not required: build & test (macos-latest), governance (frontmatter, prose, links
 ```
 
 `governance (...)` is set aside for a second reason worth recording, because it is the cost this narrowing accepts rather than a defect: that job was renamed from `RKA governance (...)`, and the repository has had no pull request since, so no pull-request run has ever produced the current name.
-A suite with no pull-request evidence behind it is not required, which can cost a verdict its demand and can never hand out a pass; the `not required:` line is what keeps that visible instead of silent.
+A suite none of those runs produced is not required, which can cost a verdict its demand and can never hand out a pass; a suite produced only by a pull-request run older than the newest five stays required; the `not required:` line is what keeps that visible instead of silent.
 `FM_CI_REQUIRED_SUITES` names the roster outright where that trade is wrong for a change.
 
 The narrowing is a no-op where the two observations agree, which is the ordinary case:
@@ -358,6 +360,6 @@ Re-run the transcripts above.
 The pull requests named here are merged and their check history is immutable, so their outputs are stable; the resolution queries are not, because they read whatever has run on the branch since, and the workflow list and file reads follow whatever the repository owns now.
 A resolution query whose reply no longer matches the shape recorded here is a finding about the resolution, not about this record.
 A verdict transcript can also move for a reason that is not a defect: the roster is read from the target branch as it is today, so a repository that has since added a gating workflow will refuse an older pull request that predates it.
-The narrowing transcripts move the same way and for the same kind of reason: the pull-request run a roster is narrowed to is whichever is newest when the command runs, so a repository that has merged a pull request since will name a different run, and one whose newest pull-request run has since expanded a job will set aside fewer suites.
+The narrowing transcripts move the same way and for the same kind of reason: the pull-request runs a roster is narrowed to are whichever are newest when the command runs, so a repository that has merged a pull request since will name different runs, and one whose recent pull-request runs have since expanded a job will set aside fewer suites.
 What a re-run has to still show is the relation, not the run ids: the push observation holding a name the pull-request observation does not, and the `not required:` line naming it.
 That is what `x45dev/agent-standards` pull request 110 does now, identically before and after this change, because a `test` workflow was added to that repository after it merged.
