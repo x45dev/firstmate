@@ -1048,3 +1048,20 @@ ok - fm_composer_verdict_reason: every verdict has a plain-language reason and a
 
 The escape tests set the alert up to reach nobody by faking a platform with no built-in channel at all, which is deterministic on any host; asserting the absence of a libnotify binary would not be.
 The composer verdict those tests drive is `unknown` on an input box with no container proof, which is the same verdict the field log recorded for every one of its 4,402 consecutive deferrals.
+
+### What the bounded escape has and has not been proven against
+
+None of this change's scenarios was driven live against the product, and none is recorded here as a live pass.
+Driving them live means wedging a real away session's delivery for hours with no reachable alert channel, on the machine that is supervising the fleet, which would risk the supervision this change exists to protect; the stubbed-pane suites are this code's established verification, so no fixture is dressed up as a live verdict.
+
+Proven against stubbed panes and stub channels only, by `tests/fm-daemon.test.sh` and `tests/fm-composer-lib.test.sh`:
+
+- Delivery that keeps failing raises the alarm and preserves the buffered updates, on an unreadable input box and on one holding unsent text.
+- A hung or failing alert channel is bounded and falls through to the next one.
+- The durable record states the outcome, how much is waiting, and why delivery failed, in plain language.
+- The escape arms only after the configured number of windows whose alert reached nobody, fires once per episode however long the stall lasts, and never fires when the alert was turned off or when a channel reached someone.
+
+Unconfirmed live, and what each would take:
+
+- The whole escape path end to end: a real away session whose delivery is refused for long enough to pass the bound, on a host with no reachable alert channel.
+- The Linux libnotify banner: a host carrying `notify-send`, which this one does not (recorded above).
