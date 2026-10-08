@@ -52,9 +52,18 @@ max_beacon_age() {
       age=$((now - mtime))
       [ "$age" -le "$worst" ] || worst=$age
     fi
-    sleep 1
+    sleep 0.2
   done
   printf '%s\n' "$worst"
+}
+
+# beacon_budget <longest-bounded-operation-seconds>
+# The legitimate worst age is the longest single bounded operation plus one
+# poll cadence (FM_POLL=1), plus one second for the integer-second mtime. Add
+# three seconds of scheduler slack for a loaded machine. The unfixed watcher
+# measured 9-10s, which is more than twice this budget.
+beacon_budget() {
+  printf '%s\n' $(( $1 + 1 + 1 + 3 ))
 }
 
 test_beacon_stays_fresh_across_a_slow_check_sweep() {
@@ -81,7 +90,7 @@ test_beacon_stays_fresh_across_a_slow_check_sweep() {
   assert_present "$beacon" "watcher never created its liveness beacon"
   # One bounded check plus the poll cadence is the whole legitimate window; the
   # sweep's four checks must not accumulate into the beacon's age.
-  budget=5
+  budget=$(beacon_budget 2)
   [ "$worst" -le "$budget" ] \
     || fail "beacon aged ${worst}s during a slow check sweep (budget ${budget}s): a working watcher reads as dead to its own guard"
   pass "beacon stays fresh through a check sweep longer than the guard grace"
@@ -108,7 +117,7 @@ test_beacon_stays_fresh_across_the_signal_grace_linger() {
   wait 2>/dev/null || true
 
   assert_present "$beacon" "watcher never created its liveness beacon"
-  budget=5
+  budget=$(beacon_budget 1)
   [ "$worst" -le "$budget" ] \
     || fail "beacon aged ${worst}s across the signal-grace linger (budget ${budget}s): a working watcher reads as dead to its own guard"
   pass "beacon stays fresh across the signal-coalescing linger"

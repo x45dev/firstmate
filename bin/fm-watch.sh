@@ -2333,6 +2333,7 @@ while :; do
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
+    watcher_beat
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and
@@ -2340,6 +2341,7 @@ while :; do
   # a skipped or failed request remains durable for another poll.
   if reconcile_requests_pending; then
     reconcile_requests_detached
+    watcher_beat
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
@@ -2347,6 +2349,7 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+  watcher_beat
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -2355,6 +2358,7 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+  watcher_beat
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
@@ -2362,14 +2366,17 @@ while :; do
   # whose owner is gone. It is a no-op with nothing registered.
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+    watcher_beat
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+  watcher_beat
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+  watcher_beat
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
@@ -2383,6 +2390,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  watcher_beat
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -2478,6 +2486,7 @@ while :; do
       fi
       pr_poll_control_release || exit 1
     done
+    watcher_beat
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
@@ -2610,6 +2619,7 @@ EOF
       fi
       triage_log "absorbed benign $reason"
     fi
+    watcher_beat
   fi
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
@@ -2866,6 +2876,7 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  watcher_beat
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
@@ -2892,9 +2903,11 @@ EOF
       # this wake sends firstmate to the whole fleet, so every log is read.
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
+      watcher_beat
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
     else
+      watcher_beat
       if ! mark_all_captain_relevant_surfaced; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
         touch "$STATE/.last-heartbeat"
