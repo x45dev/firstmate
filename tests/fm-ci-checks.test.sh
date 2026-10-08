@@ -179,6 +179,103 @@ if fm_ci_checks_state 'not json at all' "$ROSTER" "$WORKFLOWS" >/dev/null 2>&1; 
 fi
 pass "an unreadable rollup is refused instead of being classified"
 
+# --- a check that reported more than once on one commit ----------------------
+#
+# Measured on x45dev/firstmate pull request 15 at head e881404b, which is where
+# this rule comes from: the check "PR must be raised via no-mistakes" is on that
+# commit twice, FAILURE out of run 34744411381 and SUCCESS out of run
+# 34747263358 seventy minutes later, because editing the pull request body
+# fired the workflow again. Every suite on that head is green today and the
+# classifier called it failing, on a record a later report of the same check had
+# already replaced.
+#
+# The rollup shape records which run a check came from only in its details URL,
+# so these fixtures carry one.
+attempt() {
+  printf '{"__typename":"CheckRun","workflowName":"%s","name":"%s","status":"COMPLETED","conclusion":"%s","startedAt":"%s","detailsUrl":"https://github.com/example/repo/actions/runs/%s/job/%s"}' \
+    "$1" "$2" "$3" "$4" "$5" "$6"
+}
+REPLACED_ROLLUP="[$(printf '%s' "$ROSTER" | jq -r '.[] | @text' \
+  | while IFS= read -r suite_name; do
+      attempt CI "$suite_name" SUCCESS 2026-09-13T07:06:40Z 700 "70$RANDOM"
+      printf ','
+    done)$(attempt Gate "Body compliance" FAILURE 2026-09-13T07:06:43Z 701 801),$(attempt Gate "Body compliance" SUCCESS 2026-09-13T08:16:15Z 702 802)]"
+GATE_WORKFLOWS='["CI","Gate"]'
+GATE_ROSTER=$(printf '%s' "$ROSTER" | jq -c '. + ["Body compliance"]')
+
+# Without the evidence of which run was replaced, the earlier red record still
+# counts - that is this file's existing behaviour and the safe direction.
+GOT=$(fm_ci_checks_state "$REPLACED_ROLLUP" "$GATE_ROSTER" "$GATE_WORKFLOWS" '[]')
+[ "$GOT" = failing ] \
+  || fail "with no supersession known, the earlier red record must still count, got: $GOT"
+# Named as replaced, the commit reads as what it is now.
+GOT=$(fm_ci_checks_state "$REPLACED_ROLLUP" "$GATE_ROSTER" "$GATE_WORKFLOWS" '[701]')
+[ "$GOT" = passing ] \
+  || fail "a red check a later run of the same check replaced must not refuse the commit, got: $GOT"
+pass "a check run that a later run of the same check replaced is not counted against the commit"
+
+# The other direction, which no supersession may ever reach: the red record is
+# the LATER one. Naming the green run as replaced must leave the commit red.
+GOT=$(fm_ci_checks_state "$REPLACED_ROLLUP" "$GATE_ROSTER" "$GATE_WORKFLOWS" '[702]')
+[ "$GOT" = failing ] \
+  || fail "replacing the green record must leave the red one standing, got: $GOT"
+pass "the record that stands when one is replaced is the one that was not replaced"
+
+# Two attempts of one job INSIDE one run need no such evidence: they share a run
+# id, so the later startedAt is unambiguously that job's result. This is the
+# ordinary re-run of a failed job.
+RERUN_ROLLUP="[$(printf '%s' "$ROSTER" | jq -r '.[1:][] | @text' \
+  | while IFS= read -r suite_name; do
+      attempt CI "$suite_name" SUCCESS 2026-09-13T07:06:40Z 710 "71$RANDOM"
+      printf ','
+    done)$(attempt CI Lint FAILURE 2026-09-13T07:06:40Z 710 900),$(attempt CI Lint SUCCESS 2026-09-13T09:00:00Z 710 901)]"
+GOT=$(fm_ci_checks_state "$RERUN_ROLLUP" "$ROSTER" "$WORKFLOWS" '[]')
+[ "$GOT" = passing ] \
+  || fail "a job re-run green inside one run must not be counted on its failed attempt, got: $GOT"
+pass "a failed job attempt that was re-run green inside the same run is not counted"
+
+# And the same pair with no startedAt to order them by: nothing is replaced,
+# because nothing says which attempt came last.
+UNORDERED_ROLLUP=$(printf '%s' "$RERUN_ROLLUP" | jq -c '[.[] | del(.startedAt)]')
+GOT=$(fm_ci_checks_state "$UNORDERED_ROLLUP" "$ROSTER" "$WORKFLOWS" '[]')
+[ "$GOT" = failing ] \
+  || fail "attempts that cannot be ordered must all count, got: $GOT"
+pass "two attempts of one job with nothing to order them by are both counted"
+
+# --- which runs at a commit replaced which --------------------------------
+#
+# The run's display name cannot be the identity: a workflow that sets run-name
+# writes a different one per run, which is the shape x45dev/firstmate's own
+# body-compliance gate has, so two runs of one workflow arrive under two names.
+HEAD_RUNS='[
+  {"id":701,"workflow_id":9001,"name":"PR #15 body compliance - synchronize","event":"pull_request","status":"completed","conclusion":"failure"},
+  {"id":702,"workflow_id":9001,"name":"PR #15 body compliance - edited","event":"pull_request","status":"completed","conclusion":"success"},
+  {"id":703,"workflow_id":9002,"name":"CI","event":"pull_request","status":"completed","conclusion":"success"},
+  {"id":704,"workflow_id":9002,"name":"CI","event":"push","status":"completed","conclusion":"failure"}
+]'
+GOT=$(fm_ci_superseded_runs "$HEAD_RUNS")
+[ "$GOT" = '[701]' ] \
+  || fail "only the earlier run of one workflow under one event is replaced, got: $GOT"
+pass "a later run of the same workflow and event replaces the earlier one, identified by workflow rather than by name"
+
+# The push and pull_request runs of one workflow validate different trees - the
+# branch tip and the merge result - so neither replaces the other, and the red
+# push run above is still standing in that answer.
+assert_not_contains "$GOT" "704" "a run under a different event must never be reported as replaced"
+assert_not_contains "$GOT" "703" "a run under a different event must never be reported as replaced"
+pass "a run under a different event never replaces one under another, so a red branch is not hidden by a green merge"
+
+# An unreadable payload answers "none replaced", which changes no verdict.
+[ "$(fm_ci_superseded_runs 'not json')" = '[]' ] \
+  || fail "an unreadable runs payload must report nothing replaced"
+[ "$(fm_ci_superseded_runs '{"not":"an array"}')" = '[]' ] \
+  || fail "a non-array runs payload must report nothing replaced"
+# A run missing the identity to compare on is left out of every group rather
+# than grouped under a blank.
+[ "$(fm_ci_superseded_runs '[{"id":1,"event":"pull_request"},{"id":2,"event":"pull_request"}]')" = '[]' ] \
+  || fail "runs with no workflow identity must not be declared replaced"
+pass "supersession is never declared without the identity and ordering to establish it"
+
 # --- the same question in the workflow-runs shape ----------------------------
 
 # A repository can own more than one workflow, so this shape still narrows to
@@ -431,9 +528,28 @@ if [ "${1:-}" = api ]; then
         exit 1
       fi
       ;;
-    repos/example/repo/actions/runs/*/jobs*) printf '%s\n' "${FM_TEST_ROSTER_JOBS:-}" ;;
-    # The one query the candidates and the roster are both read from: the base
-    # repository's successful push runs on the target branch.
+    # The jobs of one of the base repository's runs. A per-run override lets a
+    # fixture give a workflow's pull-request run a different job graph from its
+    # push run, which is the shape the roster narrowing is read from.
+    repos/example/repo/actions/runs/*/jobs*)
+      run_id=${2#*runs/}
+      run_id=${run_id%%/*}
+      per_run=FM_TEST_JOBS_$run_id
+      printf '%s\n' "${!per_run:-${FM_TEST_ROSTER_JOBS:-}}"
+      ;;
+    # The runs at one commit in the base repository, read to find out which of
+    # them a later run of the same workflow and event replaced. Already in the
+    # projected shape, because this stub does not honour --jq.
+    repos/example/repo/actions/runs*head_sha=*)
+      printf '%s\n' "${FM_TEST_BASE_HEAD_RUNS:-[]}"
+      ;;
+    # The base repository's successful pull-request runs, which is where the
+    # roster learns which of a workflow's jobs a pull request actually produces.
+    repos/example/repo/actions/runs*event=pull_request*)
+      printf '%s\n' "${FM_TEST_PR_RUNS:-{\"workflow_runs\":[]\}}"
+      ;;
+    # The one query the candidates and the push-run roster are both read from:
+    # the base repository's successful push runs on the target branch.
     repos/example/repo/actions/runs*)        printf '%s\n' "${FM_TEST_BRANCH_RUNS:-}" ;;
     repos/example/repo)                      printf '%s\n' "${FM_TEST_REPO_META:-}" ;;
     # The evidence reads: the workflow runs at the commit in the head
@@ -519,6 +635,11 @@ repo_default
 export FM_TEST_ROSTER_JOBS
 FM_TEST_ROSTER_JOBS=$(printf '%s' "$ROSTER" | jq -c '{total_count: length, jobs: [.[] | {name: .}]}')
 export FM_TEST_REPO_META='{"default_branch":"main"}'
+# No pull-request run and no run at this commit by default, so every case
+# written before the roster narrowing and the replaced-check rule existed keeps
+# the behaviour it was written against: nothing to narrow by, nothing replaced.
+export FM_TEST_PR_RUNS='{"workflow_runs":[]}'
+export FM_TEST_BASE_HEAD_RUNS='[]'
 export PATH FM_TEST_ROLLUP FM_TEST_RUNS FM_TEST_JOBS FM_TEST_SHA FM_TEST_HEAD_REPO FM_TEST_BASE_REF
 
 URL=https://github.com/example/repo/pull/7
@@ -854,6 +975,112 @@ assert_not_contains "$OUT" "validated:" "a gate that never ran must never be rep
 repo_default
 FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_DEFAULT
 pass "the three outcomes stay distinct on a repository whose gate is not named CI"
+
+# --- what a pull request of a gating workflow actually produces --------------
+#
+# The second half of the unreachable-suite defect, one level below the trigger
+# test above. A gating workflow can expand a different job graph under a
+# different event, and x45dev/qrarca's does: its matrix is
+# `${{ github.event_name == 'pull_request' && fromJSON(two platforms) ||
+# fromJSON(three) }}`, so the newest successful push run of `ci` on main carries
+# "build & test (macos-latest)" and no pull-request run of that workflow has
+# ever expanded that leg. Measured 2026-10-07 against the live repository:
+# push run 34421372166 names five jobs, pull-request run 30418714800 names four,
+# and the macOS leg is the difference. Demanding it of a pull request there is
+# the same refusal the trigger test removed, arriving through the roster
+# instead of through the gate.
+PUSH_ONLY_JOBS='{"total_count":3,"jobs":[{"name":"lint"},{"name":"test"},{"name":"test (macos)"}]}'
+PR_RUN_JOBS='{"total_count":2,"jobs":[{"name":"lint"},{"name":"test"}]}'
+repo_workflows "CI|9201|push,pull_request"
+FM_TEST_ROSTER_JOBS=$PUSH_ONLY_JOBS
+# Keyed by the workflow identity the fixture gave CI, because a run records the
+# workflow it belongs to by id and never by the name it displayed.
+CI_WID=$(printf '%s' "$FM_TEST_WORKFLOWS" | jq -r '.workflows[] | select(.name == "CI") | .id')
+pr_runs_for() { printf '{"workflow_runs":[{"id":%s,"workflow_id":%s}]}' "$1" "$CI_WID"; }
+FM_TEST_PR_RUNS=$(pr_runs_for 9301)
+export FM_TEST_JOBS_9301=$PR_RUN_JOBS
+fm_ci_roster example/repo main \
+  || fail "a workflow whose pull-request run is narrower must still yield a standard"
+[ "$FM_CI_ROSTER" = '["lint","test"]' ] \
+  || fail "the roster must hold only the jobs a pull request of that workflow produces, got: $FM_CI_ROSTER"
+assert_contains "$FM_CI_ROSTER_EXCLUDED" "test (macos)" \
+  "the provenance must name the suite that was set aside"
+assert_contains "$FM_CI_ROSTER_EXCLUDED" "9301" \
+  "the provenance must name the pull-request run that showed it was not produced"
+assert_contains "$FM_CI_ROSTER_SOURCE" "9301" \
+  "the roster provenance must name the pull-request run it was narrowed to"
+pass "a job a gating workflow expands on a push but never on a pull request is not required of one"
+
+# Narrowing is anchored to the target branch: a name the pull-request run
+# produces that the branch's own push run does not is NOT added to the roster,
+# because every required name still has to be one the target branch validated.
+export FM_TEST_JOBS_9301='{"total_count":3,"jobs":[{"name":"lint"},{"name":"test"},{"name":"extra"}]}'
+fm_ci_roster example/repo main || fail "a wider pull-request run must still yield a standard"
+[ "$FM_CI_ROSTER" = '["lint","test"]' ] \
+  || fail "the pull-request run must narrow the roster and never widen it, got: $FM_CI_ROSTER"
+pass "a pull-request run never adds a suite the target branch did not validate on a push"
+
+# No pull-request run of that workflow means no evidence to narrow by, so the
+# roster stays what the push run named. That is the fallback for a gate running
+# on pull_request_target too, which the pull_request query does not see, and it
+# costs a verdict rather than granting one.
+unset FM_TEST_JOBS_9301
+FM_TEST_PR_RUNS='{"workflow_runs":[]}'
+fm_ci_roster example/repo main || fail "a workflow with no pull-request run must still yield a standard"
+[ "$FM_CI_ROSTER" = '["lint","test","test (macos)"]' ] \
+  || fail "with nothing to narrow by the roster must be the push run, got: $FM_CI_ROSTER"
+[ -z "$FM_CI_ROSTER_EXCLUDED" ] \
+  || fail "nothing may be reported as set aside when nothing was: $FM_CI_ROSTER_EXCLUDED"
+pass "a gating workflow with no observed pull-request run keeps the roster its push run named"
+
+# An observation that shares no name at all with the push run describes a job
+# graph too different to narrow by - a workflow renamed every job, say - so it
+# is discarded rather than used to empty the roster.
+FM_TEST_PR_RUNS=$(pr_runs_for 9302)
+export FM_TEST_JOBS_9302='{"total_count":1,"jobs":[{"name":"something else entirely"}]}'
+fm_ci_roster example/repo main || fail "an incomparable pull-request run must still yield a standard"
+[ "$FM_CI_ROSTER" = '["lint","test","test (macos)"]' ] \
+  || fail "an incomparable observation must not narrow the roster, got: $FM_CI_ROSTER"
+pass "a pull-request run sharing no job name with the push run is discarded rather than used to empty the roster"
+
+# A pull-request run whose jobs cannot be read in full is discarded for the same
+# reason: a short name list would drop suites that really are required.
+unset FM_TEST_JOBS_9302
+export FM_TEST_JOBS_9302='{"total_count":214,"jobs":[{"name":"lint"}]}'
+fm_ci_roster example/repo main || fail "an unreadable pull-request run must still yield a standard"
+[ "$FM_CI_ROSTER" = '["lint","test","test (macos)"]' ] \
+  || fail "a pull-request run past one page must not narrow the roster, got: $FM_CI_ROSTER"
+unset FM_TEST_JOBS_9302
+pass "a pull-request run whose jobs run past one page is discarded rather than used short"
+
+# End to end on that repository shape: a pull request carrying the two suites a
+# pull request there can produce, and not the push-only third, is accepted and
+# says what it set aside.
+FM_TEST_PR_RUNS=$(pr_runs_for 9301)
+export FM_TEST_JOBS_9301=$PR_RUN_JOBS
+FM_TEST_ROLLUP='[{"__typename":"CheckRun","workflowName":"CI","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","workflowName":"CI","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]'
+OUT=$(verify); CODE=$?
+[ "$CODE" = 0 ] \
+  || fail "a pull request carrying every suite a pull request there can produce must be accepted, exited $CODE: $OUT"
+assert_contains "$OUT" "validated:" "the verdict must state that the commit was validated"
+assert_contains "$OUT" "not required: test (macos)" \
+  "the verdict must say the push-only suite was considered and set aside"
+pass "fm-pr-ci-verify.sh verifies a pull request on a repository whose gate expands a wider matrix on a push"
+
+# The narrowing may not have widened anything: a pull request short of the two
+# suites it CAN produce is still refused.
+FM_TEST_ROLLUP='[{"__typename":"CheckRun","workflowName":"CI","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}]'
+OUT=$(verify); CODE=$?
+[ "$CODE" = 1 ] || fail "a pull request short of its narrowed roster must be refused, exited $CODE: $OUT"
+assert_contains "$OUT" "test" "the refusal must name the suite that never reported"
+assert_not_contains "$OUT" "validated:" "a roster-short pull request must never be reported as validated"
+pass "a pull request short of the suites a pull request can produce is still refused"
+
+unset FM_TEST_JOBS_9301
+FM_TEST_PR_RUNS='{"workflow_runs":[]}'
+repo_default
+FM_TEST_ROSTER_JOBS=$ROSTER_JOBS_DEFAULT
+FM_TEST_ROLLUP='[]'
 
 # --- the landing-site refusal, end to end ------------------------------------
 #

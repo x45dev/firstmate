@@ -1,10 +1,10 @@
 # Gating workflow resolution verification
 
 Empirical record for how `bin/fm-ci-checks-lib.sh` decides which workflows are a repository's pull request gate, and for the three outcomes `bin/fm-pr-ci-verify.sh` must keep apart while doing it.
-The resolution queries and the two-outcome transcripts under "The push-only deploy" were run on 2026-09-10; the transcripts under "The three outcomes, live" were run on 2026-09-02.
+The resolution queries and the two-outcome transcripts under "The push-only deploy" were run on 2026-09-10; the transcripts under "The three outcomes, live" were run on 2026-09-02; those under "The roster narrowed to what a pull request produces" and "A check that reported again on the same commit" were run on 2026-10-07.
 Every output is reproduced exactly.
 
-The guarantee this record supports: the gate follows the repository under test, so a repository whose gating workflow is not named `CI` is answered rather than refused, a workflow no pull request can trigger is not demanded of one, and a green verdict is still granted only on evidence.
+The guarantee this record supports: the gate follows the repository under test, so a repository whose gating workflow is not named `CI` is answered rather than refused, a workflow no pull request can trigger is not demanded of one, a job no pull request of a gating workflow produces is not demanded either, a check record that a later report of the same check replaced is not counted, and a green verdict is still granted only on evidence.
 The portable regression in `tests/fm-ci-checks.test.sh` pins the classifier and the resolution logic against a stubbed forge; only a live run can show that the queries this resolution is built on return what the resolution assumes.
 
 ## Versions
@@ -250,10 +250,114 @@ $ echo $?
 1
 ```
 
+## The roster narrowed to what a pull request produces
+
+Run 2026-10-07.
+A gating workflow can expand a different job graph under a different event, so the jobs of its newest successful push run on the target branch are not the jobs a pull request of it produces.
+`x45dev/qrarca` is the live case: its `ci` workflow builds its matrix from `github.event_name`, three platforms on a push to main and two on a pull request.
+
+```
+$ gh api "repos/x45dev/qrarca/actions/runs/34421372166/jobs?per_page=100" --jq "[.jobs[].name] | sort | .[]"
+build & test (macos-latest)
+build & test (ubuntu-latest)
+build & test (windows-latest)
+cargo-deny (licenses, advisories, bans, sources)
+governance (frontmatter, prose, links, config-layout)
+
+$ gh api "repos/x45dev/qrarca/actions/runs/30418714800/jobs?per_page=100" --jq "[.jobs[].name] | sort | .[]"
+RKA governance (frontmatter, prose, links, config-layout)
+build & test (ubuntu-latest)
+build & test (windows-latest)
+cargo-deny (licenses, advisories, bans, sources)
+```
+
+The first is run `34421372166`, the newest successful push run of `ci` on `main`; the second is run `30418714800`, the newest successful pull-request run of the same workflow.
+`build & test (macos-latest)` is in the first and not the second, and no pull request there can produce it.
+
+Before this change the roster was the push run alone, so every `x45dev/qrarca` pull request was refused for a suite it could not produce:
+
+```
+required suites: 5, from x45dev/qrarca ci run 34421372166 on main
+build & test (macos-latest)
+build & test (ubuntu-latest)
+build & test (windows-latest)
+cargo-deny (licenses, advisories, bans, sources)
+governance (frontmatter, prose, links, config-layout)
+```
+
+After it the push run's names are narrowed to the ones that pull-request run also produced, and what was set aside is named with the evidence for setting it aside:
+
+```
+required suites: 3, from x45dev/qrarca ci run 34421372166 narrowed to its pull-request run 30418714800 on main
+build & test (ubuntu-latest)
+build & test (windows-latest)
+cargo-deny (licenses, advisories, bans, sources)
+not required: build & test (macos-latest), governance (frontmatter, prose, links, config-layout) (not produced by ci run 30418714800, its newest pull-request run)
+```
+
+`governance (...)` is set aside for a second reason worth recording, because it is the cost this narrowing accepts rather than a defect: that job was renamed from `RKA governance (...)`, and the repository has had no pull request since, so no pull-request run has ever produced the current name.
+A suite with no pull-request evidence behind it is not required, which can cost a verdict its demand and can never hand out a pass; the `not required:` line is what keeps that visible instead of silent.
+`FM_CI_REQUIRED_SUITES` names the roster outright where that trade is wrong for a change.
+
+The narrowing is a no-op where the two observations agree, which is the ordinary case:
+
+```
+$ bin/fm-pr-ci-verify.sh https://github.com/x45dev/firstmate/pull/15
+required suites: 13, from x45dev/firstmate CI run 35724921988 narrowed to its pull-request run 35704441515 on main
+```
+
+Thirteen suites before and after, and no `not required:` line.
+
+## A check that reported again on the same commit
+
+Run 2026-10-07.
+GitHub leaves the earlier check run on a commit when the same check reports again, so a head can carry a red record that a later report has already replaced.
+`x45dev/firstmate` pull request 15 is the recorded case: editing its body fired the body-compliance workflow a second time at the same head.
+
+```
+$ gh api "repos/x45dev/firstmate/actions/runs?head_sha=e881404b73148272a21864d2a6c77f958a2d5476&per_page=100" --jq '.workflow_runs[] | [.id, .workflow_id, .event, .conclusion] | @tsv'
+34747263358	340944979	pull_request	success
+34744411381	340944979	pull_request	failure
+34744411376	340345540	pull_request	success
+34744409388	340345540	push	success
+```
+
+Runs `34744411381` and `34747263358` are the same workflow (`340944979`) under the same event, so the later one replaced the earlier.
+Runs `34744411376` and `34744409388` are one workflow under two events, validating the branch tip and the merge result, so neither replaces the other.
+
+Before this change the replaced record still counted and the commit read failing:
+
+```
+$ bin/fm-pr-ci-verify.sh https://github.com/x45dev/firstmate/pull/15
+required suites: 13, from x45dev/firstmate CI run 35724921988 on main
+  suite FAILURE	Require no-mistakes / PR must be raised via no-mistakes
+  suite SUCCESS	Require no-mistakes / PR must be raised via no-mistakes
+x45dev/firstmate checks: failing (28 repository-owned)
+error: refusing to call https://github.com/x45dev/firstmate/pull/15 green: its x45dev/firstmate checks are failing (see the roster above).
+$ echo $?
+1
+```
+
+After it the replaced record is marked and set aside, and the commit reads as what it is now:
+
+```
+$ bin/fm-pr-ci-verify.sh https://github.com/x45dev/firstmate/pull/15
+  suite SUCCESS	Require no-mistakes / PR must be raised via no-mistakes
+  suite FAILURE	Require no-mistakes / PR must be raised via no-mistakes (replaced by a later report)
+x45dev/firstmate checks: passing (27 repository-owned)
+validated: x45dev/firstmate suites passed on e881404b73148272a21864d2a6c77f958a2d5476 in x45dev/firstmate
+$ echo $?
+0
+```
+
+The thirteen `CI` suite lines, green in both transcripts, are elided above; every other line is verbatim.
+
 ## Refreshing this record
 
 Re-run the transcripts above.
 The pull requests named here are merged and their check history is immutable, so their outputs are stable; the resolution queries are not, because they read whatever has run on the branch since, and the workflow list and file reads follow whatever the repository owns now.
 A resolution query whose reply no longer matches the shape recorded here is a finding about the resolution, not about this record.
 A verdict transcript can also move for a reason that is not a defect: the roster is read from the target branch as it is today, so a repository that has since added a gating workflow will refuse an older pull request that predates it.
+The narrowing transcripts move the same way and for the same kind of reason: the pull-request run a roster is narrowed to is whichever is newest when the command runs, so a repository that has merged a pull request since will name a different run, and one whose newest pull-request run has since expanded a job will set aside fewer suites.
+What a re-run has to still show is the relation, not the run ids: the push observation holding a name the pull-request observation does not, and the `not required:` line naming it.
 That is what `x45dev/agent-standards` pull request 110 does now, identically before and after this change, because a `test` workflow was added to that repository after it merged.

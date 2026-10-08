@@ -318,6 +318,7 @@ EOF
       fi
       repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" \
         --argjson fm_ci_roster "$repo_roster" --argjson fm_ci_workflows "$repo_workflows" \
+        --argjson fm_ci_superseded '[]' \
         "$FM_CI_CHECKS_JQ_DEFS"'
         [ .[] | {
           num:(.number|tostring),
@@ -331,6 +332,12 @@ EOF
           # passing. A rollup holding nothing but a review bot pass is exactly
           # what a pull request whose own suites never started looks like, and
           # reading that as green is how one gets reported as validated.
+          # These rows carry no supersession evidence: establishing it needs
+          # one read of the runs at each commit, which is a read per row rather than
+          # per repository. Binding it empty leaves a replaced red check
+          # counted, which is what these rows already did - it can cost a row
+          # its green and can never hand one out, and fm-pr-ci-verify.sh is
+          # where a single pull request pays for the answer.
           checks:((.statusCheckRollup // []) | fm_ci_state)
         } ] as $rows | {returned:($rows | length), rows:$rows[:$limit]}') || { nwarn=$((nwarn + 1)); continue; }
       returned=$(printf '%s' "$repo_result" | jq '.returned')
