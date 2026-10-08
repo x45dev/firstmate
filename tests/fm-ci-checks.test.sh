@@ -1020,6 +1020,20 @@ fm_ci_roster example/repo main || fail "a wider pull-request run must still yiel
   || fail "the pull-request run must narrow the roster and never widen it, got: $FM_CI_ROSTER"
 pass "a pull-request run never adds a suite the target branch did not validate on a push"
 
+# A lighter newest run must not hide a suite an earlier successful run produced:
+# a docs-only pull request expands fewer jobs, and one such run is not evidence
+# that the suite is unreachable.
+FM_TEST_PR_RUNS=$(printf '{"workflow_runs":[{"id":9304,"workflow_id":%s},{"id":9303,"workflow_id":%s}]}' "$CI_WID" "$CI_WID")
+export FM_TEST_JOBS_9304='{"total_count":1,"jobs":[{"name":"lint"}]}'
+export FM_TEST_JOBS_9303=$PR_RUN_JOBS
+fm_ci_roster example/repo main || fail "a lighter newest pull-request run must still yield a standard"
+[ "$FM_CI_ROSTER" = '["lint","test"]' ] \
+  || fail "a suite an earlier pull-request run produced must stay required, got: $FM_CI_ROSTER"
+assert_contains "$FM_CI_ROSTER_EXCLUDED" "test (macos)" \
+  "a name no recent pull-request run produced must still be set aside"
+unset FM_TEST_JOBS_9304 FM_TEST_JOBS_9303
+pass "a lighter newest pull-request run does not hide a suite an earlier successful run produced"
+
 # No pull-request run of that workflow means no evidence to narrow by, so the
 # roster stays what the push run named. That is the fallback for a gate running
 # on pull_request_target too, which the pull_request query does not see, and it

@@ -642,7 +642,7 @@ fm_ci_roster() {
   local gate_override='' roster_override='' runs gate observed missing
   local names names_source roster roster_source excluded owned
   local name path wstate run_id wid file run_jobs total jobs rc
-  local pr_runs='[]' pr_run pr_jobs keep drop roster_excluded=''
+  local pr_runs='[]' pr_run pr_jobs pr_union pr_seen keep drop roster_excluded=''
   FM_CI_WORKFLOWS=''
   FM_CI_WORKFLOWS_SOURCE=''
   FM_CI_WORKFLOWS_EXCLUDED=''
@@ -843,21 +843,33 @@ EOF
   # the same refusal the trigger test above removed one level up, arriving one
   # level down.
   #
-  # So each gating workflow's own newest successful pull_request run is read
+  # So each gating workflow's recent successful pull_request runs are read
   # too, and the roster taken from the push run is narrowed to the names that
-  # run also produced. Narrowing rather than replacing is what keeps the roster
-  # anchored to the target branch: every name still comes from what the branch
-  # itself validated on a push, and the pull-request observation only says
-  # which of those names a pull request has been seen to produce.
+  # at least one of them also produced. Narrowing rather than replacing is what
+  # keeps the roster anchored to the target branch: every name still comes from
+  # what the branch itself validated on a push, and the pull-request
+  # observation only says which of those names a pull request has been seen to
+  # produce.
   #
-  # No pull-request observation means no narrowing, and so today's roster. That
-  # is the safe direction - it costs a verdict and cannot grant one - and it is
-  # also the whole fallback for a gate that runs on pull_request_target, which
-  # the single event-filtered query below does not see. The same goes for a
-  # reply this code cannot read in full: a short job list would drop names that
-  # are genuinely required, so an imperfect read is discarded rather than used.
-  # An observation that shares no name at all with the push run is discarded for
-  # the same reason, since it describes a job graph too different to narrow by.
+  # The narrowing is a union across runs, never one run's say. A single run is
+  # a poor witness of what a pull request can produce: a path-filtered or
+  # docs-only pull request expands fewer jobs, and if it happened to be the
+  # newest it would drop every suite it did not expand, so a later pull request
+  # that silently failed to produce one of them would read as passing. A name
+  # is therefore dropped only when none of the newest five successful
+  # pull-request runs of its workflow, all taken from the one 100-run window
+  # below, ever produced it. That bound is what one more job read per run costs,
+  # and it errs toward keeping a suite: a name produced only by a pull request
+  # older than those five is demanded, which costs a verdict and cannot grant
+  # one.
+  #
+  # No readable pull-request observation means no narrowing, and so today's
+  # roster. That is also the whole fallback for a gate that runs on
+  # pull_request_target, which the single event-filtered query below does not
+  # see. A run whose jobs cannot be read in full is skipped, since a short job
+  # list would drop names that are genuinely required. A union that shares no
+  # name at all with the push run is discarded for the same reason, since it
+  # describes a job graph too different to narrow by.
   #
   # The query cannot be restricted to the target branch: `branch` matches a
   # run's head branch, and a pull_request run's head branch is the branch under
@@ -868,7 +880,8 @@ EOF
       "repos/$repo/actions/runs?status=success&event=pull_request&per_page=100" 2>/dev/null \
       | jq -c '[.workflow_runs[]? | {wid: .workflow_id, id: .id}
                | select((.wid | type) == "number" and (.id | type) == "number")]
-              | group_by(.wid) | map(max_by(.id))' 2>/dev/null) || pr_runs=''
+              | group_by(.wid)
+              | map({wid: .[0].wid, ids: ([.[].id] | sort | reverse | .[:5])})' 2>/dev/null) || pr_runs=''
     [ -n "$pr_runs" ] || pr_runs='[]'
   fi
 
@@ -902,19 +915,27 @@ EOF
     }
     roster_source="${roster_source:+$roster_source, }$name run $run_id"
 
-    # Narrow this workflow's contribution to the names a pull request of it has
-    # been seen to produce, when there is such a run and it is comparable.
-    pr_run=$(jq -rn --argjson p "$pr_runs" --argjson w "${wid:-null}" \
-      '[$p[] | select($w != null and .wid == $w) | .id] | first // empty' 2>/dev/null) || pr_run=''
-    if [ -n "$pr_run" ] && pr_jobs=$(fm_ci_run_job_names "$repo" "$pr_run"); then
-      keep=$(jq -cn --argjson a "$jobs" --argjson b "$pr_jobs" \
+    # Narrow this workflow's contribution to the names some recent pull request
+    # of it has been seen to produce, when there is such a run and it is
+    # comparable.
+    pr_union='[]'
+    pr_seen=''
+    for pr_run in $(jq -r --argjson w "${wid:-null}" \
+      '.[] | select($w != null and .wid == $w) | .ids[]' <<<"$pr_runs" 2>/dev/null); do
+      pr_jobs=$(fm_ci_run_job_names "$repo" "$pr_run") || continue
+      pr_union=$(jq -cn --argjson a "$pr_union" --argjson b "$pr_jobs" '($a + $b) | unique' 2>/dev/null) \
+        || continue
+      pr_seen="${pr_seen:+$pr_seen, }$pr_run"
+    done
+    if [ -n "$pr_seen" ]; then
+      keep=$(jq -cn --argjson a "$jobs" --argjson b "$pr_union" \
         '[$a[] | select(. as $n | $b | index($n))]' 2>/dev/null) || keep=''
       if [ -n "$keep" ] && [ "$keep" != '[]' ]; then
         drop=$(jq -rn --argjson a "$jobs" --argjson k "$keep" \
           '[$a[] | select(. as $n | ($k | index($n)) == null)] | join(", ")' 2>/dev/null) || drop=''
         jobs=$keep
-        roster_source="$roster_source narrowed to its pull-request run $pr_run"
-        [ -z "$drop" ] || roster_excluded="${roster_excluded:+$roster_excluded; }$drop (not produced by $name run $pr_run, its newest pull-request run)"
+        roster_source="$roster_source narrowed to its pull-request runs $pr_seen"
+        [ -z "$drop" ] || roster_excluded="${roster_excluded:+$roster_excluded; }$drop (not produced by $name pull-request runs $pr_seen)"
       fi
     fi
 
